@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { transformForToolTunnel } from '@/llm/toolCallTransform';
 import { compilePromptPreset } from './compiler';
 import { BUILTIN_PROMPT_PRESETS, resolvePromptPreset } from './presets';
 import type { AutoTagCompileContext, PromptPreset } from './types';
@@ -240,5 +241,55 @@ describe('compilePromptPreset', () => {
     expect(res.messages).toEqual([{ role: 'user', content: 'SYS_NOTE\n\nNO_TARGET_SLOT' }]);
     expect(res.lintWarnings.some(w => w.includes('ToolCall引导'))).toBe(true);
     expect(res.lintWarnings.some(w => w.includes('待生图正文'))).toBe(true);
+  });
+
+  it('compiles all 4 builtin presets with zero lint warnings and proper Mode A / Mode B tool tunnel wiring', () => {
+    const ctx = makeCtx();
+    for (const preset of BUILTIN_PROMPT_PRESETS) {
+      const compiled = compilePromptPreset(preset, ctx);
+      expect(compiled.lintWarnings, preset.id).toEqual([]);
+    }
+
+    // Mode B (builtin_tool_tunnel): guideIndices 为空，走 standard_tunnel 并附加 3 段握手与随机字符噪声流
+    const modeB = resolvePromptPreset('builtin_tool_tunnel', []);
+    const compiledB = compilePromptPreset(modeB, ctx);
+    expect(compiledB.guideIndices).toEqual([]);
+    const tunnelB = transformForToolTunnel(compiledB.messages, modeB.toolCall, compiledB.guideIndices);
+    expect(tunnelB.mode).toBe('standard_tunnel');
+    const tailMsgs = tunnelB.messages.slice(-3);
+    expect(tailMsgs.map(m => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(String(tailMsgs[2].content)).toContain('qrQ5Ib9DqSpIUkdsuWrjWC46');
+    for (const msg of tailMsgs) {
+      expect(String(msg.content)).toContain(tunnelB.toolName);
+      expect(String(msg.content)).not.toContain('%TOOL_NAME%');
+      expect(String(msg.content)).not.toContain('{{roll');
+    }
+
+    // Mode A (builtin_tool_guide): 7 段昆仑终端 tool_guide 独立保留，正文/规范全部打入 tool.description
+    const modeA = resolvePromptPreset('builtin_tool_guide', []);
+    const compiledA = compilePromptPreset(modeA, ctx);
+    expect(compiledA.guideIndices).toHaveLength(7);
+    const tunnelA = transformForToolTunnel(compiledA.messages, modeA.toolCall, compiledA.guideIndices);
+    expect(tunnelA.mode).toBe('guide_wrap');
+    expect(tunnelA.messages.map(m => m.role)).toEqual([
+      'system',
+      'system',
+      'system',
+      'user',
+      'assistant',
+      'user',
+      'user',
+    ]);
+    expect(tunnelA.messages[0].content).toContain('You are Antigravity');
+    expect(tunnelA.messages[0].content).toContain('Kernel panic - not syncing');
+    expect(tunnelA.messages[0].content).not.toContain('{{roll 1999999}}');
+    expect(tunnelA.messages[5].content).toContain('INVOKE_NOW');
+    expect(tunnelA.messages[5].content).toContain(tunnelA.toolName);
+    expect(tunnelA.messages[5].content).not.toContain('%TOOL_NAME%');
+    expect(tunnelA.messages[6].content).toContain('</Linux_terminal_emulator>');
+    expect(tunnelA.messages[6].content).toMatch(/<roll_number>\n\d+/);
+    expect(tunnelA.tools[0].function.description).toContain('Kernel panic - not syncing');
+    expect(tunnelA.tools[0].function.description).toContain('BACKEND_SPEC');
+    expect(tunnelA.tools[0].function.description).toContain('莉莉丝在雨夜的窗边翻开魔导书');
   });
 });

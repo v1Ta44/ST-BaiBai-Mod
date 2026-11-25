@@ -1330,7 +1330,10 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     expect(guideText).toContain('中间用户楼');
     expect(guideText).toContain('目标正文 ⟦P1⟧');
     expect(guideMessages[guideMessages.length - 1].role).toBe('user');
-    expect(guideMessages[guideMessages.length - 1].content).toContain('通过调用该工具提交 thoughts');
+    expect(guideMessages[guideMessages.length - 1].content).toContain('</Linux_terminal_emulator>');
+    expect(guideMessages[guideMessages.length - 1].content).toMatch(/<roll_number>\n\d+/);
+    expect(guideText).toContain('INVOKE_NOW');
+    expect(guideText).toContain('display_stream');
 
     const structuredMessages = await buildAutoTagMessages(
       ctx,
@@ -1346,5 +1349,90 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     const structuredText = structuredMessages.map(m => m.content).join('\n\n');
     expect(structuredText).toContain('submit_illustration_plan');
     expect(structuredText).toContain('目标正文 ⟦P1⟧');
+  });
+
+  it('keeps verbatim jailbreak identity/kernel-panic/roll-flood and embeds Zhihuiji enhancement modules in illustration mode while filtering them in comic mode', async () => {
+    const state = snapshot();
+    const savedKind = state.preset.kind;
+    const savedSet = state.preset.promptSetId;
+    try {
+      settings.defaultBackend = 'comfyui';
+      state.preset.kind = 'illustration';
+      state.preset.promptSetId = 'builtin_illust';
+      const illustMessages = await buildAutoTagMessages(context(), 1, options(), null);
+      const illustText = illustMessages.map(m => m.content).join('\n');
+
+      // 原版破限内核：伪造系统身份 + Kernel Panic 日志 + 合规红线审计 + 展开的纯数字刷屏噪声 + 不含 characters
+      expect(illustMessages[0].content).toContain('You are Antigravity');
+      expect(illustMessages[0].content).toContain('<Linux_terminal_emulator>');
+      expect(illustMessages[0].content).toContain('Kernel panic - not syncing');
+      expect(illustMessages[0].content).toContain('PREFLIGHT_SECURITY_AUDIT｜R18G_ZERO_TOLERANCE_CHECK');
+      expect(illustMessages[0].content).toContain('NO_GROTESQUE_MUTILATION_NO_MINORS');
+      expect(illustMessages[0].content).toMatch(/<roll_number>\n\d+/);
+      expect(illustMessages[0].content).not.toContain('{{roll 1999999}}');
+      expect(illustText).not.toContain('characters');
+
+      // 创作表达强化层、导演构图与视觉状态锁要点
+      expect(illustText).toContain('提示词作用场三维度');
+      expect(illustText).toContain('视觉焦点 ≠ 镜头距离 ≠ 角色可见范围');
+      expect(illustText).toContain('九类主体定位');
+      expect(illustText).toContain('Type H');
+      expect(illustText).toContain('Type M');
+      expect(illustText).toContain('内衣防透视原则');
+      expect(illustText).toContain('五相位');
+
+      // 审美视觉重心开关默认关闭
+      expect(illustText).not.toContain('视觉重心开关｜男性向审美偏好');
+      expect(illustText).not.toContain('视觉重心开关｜女性向审美偏好');
+
+      // 克隆启用男性向视觉重心开关后正确注入
+      const presetWithMaleBias = resolvePromptPreset('builtin_text_json', []);
+      const cloned = {
+        ...presetWithMaleBias,
+        builtin: false,
+        entries: presetWithMaleBias.entries.map(e =>
+          e.id === 'entry_aesthetic_male' ? { ...e, enabled: true } : e,
+        ),
+      };
+      const maleBiasText = (
+        await buildAutoTagMessages(context(), 1, options(), null, undefined, null, '', undefined, cloned)
+      )
+        .map(m => m.content)
+        .join('\n');
+      expect(maleBiasText).toContain('视觉重心开关｜男性向审美偏好');
+      expect(maleBiasText).not.toContain('视觉重心开关｜女性向审美偏好');
+
+      // 漫画模式：过滤掉 comic='off' 的插画专属模块，仅保留通用语义场强化层
+      state.preset.kind = 'comic';
+      state.preset.promptSetId = 'builtin_comic';
+      const comicText = (await buildAutoTagMessages(context(), 1, options(), null))
+        .map(m => m.content)
+        .join('\n');
+      expect(comicText).toContain('创作表达强化层｜语义场与提示词执行');
+      expect(comicText).not.toContain('<导演构图与空间物理规范>');
+      expect(comicText).not.toContain('<跨图视觉状态锁与叙事连续性>');
+    } finally {
+      state.preset.kind = savedKind;
+      state.preset.promptSetId = savedSet;
+      state.restore();
+    }
+  });
+
+  it('includes Safe/R/X three-question grading in NAI V5 spec without leaking成年人 into spec/thinking', async () => {
+    const state = snapshot();
+    try {
+      settings.defaultBackend = 'nai';
+      activeNaiPlan().model = 'nai-diffusion-5-full';
+      activeNaiPlan().naturalLanguage = true;
+      const msgs = await buildAutoTagMessages(context(), 1, options(), null);
+      const spec = pick(msgs, NAI_SPEC_MARK);
+      expect(spec).toContain('Content rating three-question check');
+      expect(spec).toContain('Safe (no nudity');
+      expect(spec).toContain('R (covered nudity');
+      expect(spec).toContain('X (explicit NSFW scene');
+      expect(backendSpecAndThinking(msgs)).not.toContain('成年人');
+    } finally {
+      state.restore();
+    }
   });
 });
