@@ -16,6 +16,11 @@ import {
   type AutoTagPrompts,
   type AutoTagSettings,
 } from '@/state/settings';
+import {
+  DEFAULT_COMFY_COMIC_THINKING,
+  DEFAULT_COMFY_THINKING,
+  DEFAULT_NAI_THINKING,
+} from '@/prompt/defaultBlocks';
 import { resolvePromptPreset } from '@/prompt/presets';
 import type { STContext } from '@/st/context';
 
@@ -1433,6 +1438,34 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       expect(backendSpecAndThinking(msgs)).not.toContain('成年人');
     } finally {
       state.restore();
+    }
+  });
+
+  it('integrates Zhihuiji Director CoT methodology across all built-in thinking guides without leaking forbidden strings', () => {
+    for (const text of [
+      DEFAULT_COMFY_THINKING,
+      DEFAULT_NAI_THINKING,
+      DEFAULT_NAI_V5_THINKING,
+      DEFAULT_COMFY_COMIC_THINKING,
+    ]) {
+      expect(text).toContain('导演思维链顺序');
+      expect(text).toContain('同人/原创三问判定');
+      expect(text).toContain('接触点');
+      expect(text).toContain('UC/PC/NC');
+      expect(text).toContain('镜头变化不能替代故事状态变化');
+      expect(text).not.toContain('肉棒');
+      expect(text).not.toContain('$调用$');
+      expect(text).not.toContain('<disclaimer>');
+    }
+    for (const comfyText of [DEFAULT_COMFY_THINKING, DEFAULT_COMFY_COMIC_THINKING]) {
+      expect(comfyText).not.toContain('characters');
+    }
+    for (const naiText of [DEFAULT_NAI_THINKING, DEFAULT_NAI_V5_THINKING]) {
+      expect(naiText).not.toContain('成年人');
+    }
+    for (const illuText of [DEFAULT_COMFY_THINKING, DEFAULT_NAI_THINKING, DEFAULT_NAI_V5_THINKING]) {
+      expect(illuText).toContain('上一图结束什么状态，本图就从什么状态开始');
+      expect(illuText).toContain('画面信息量与导演自查（S9/S10）');
     }
   });
 });
