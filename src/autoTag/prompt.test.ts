@@ -255,88 +255,71 @@ describe('auto tag prompt', () => {
     const thinkingMsg = messages.find(m => m.content.includes('输出前思考清单'));
     expect(thinkingMsg?.role).toBe('system');
 
-    // 两层结构:A~E 是整楼一次的全局判断,第二层是逐图槽位块。
-    // 结构骨架比逐字文案更值得钉——散装 bullet 正是模型把每图压成一句话的原因。
-    expect(thinkingMsg?.content).toContain('第一层｜全局判断（整楼各做一次）');
-    expect(thinkingMsg?.content).toContain('第二层｜逐张图槽位块');
-    expect(thinkingMsg?.content).toContain('不得合并、不得跨图共用一份');
-    expect(thinkingMsg?.content).toContain('第三层｜落笔前自查');
-    for (const slot of ['人物：', '核心动作：', '景别：', '场景：', '环境光：', 'size：']) {
-      expect(thinkingMsg?.content).toContain(slot);
+    // 新版已完全重写为智绘姬导演思考工作流：全局规划【0】～【2】+ 逐图 ═══[S0]~[S10]═══
+    expect(thinkingMsg?.content).toContain('全局规划（整楼只做一次，以下【0】～【2】一次定死）');
+    expect(thinkingMsg?.content).toContain('逐图导演工作流');
+    expect(thinkingMsg?.content).toContain('严禁「同上/保持不变」式省略');
+    for (const stage of [
+      '═══[S0 正文→画面]═══',
+      '═══[S1 合规与事实边界]═══',
+      '═══[S2 人数与空间]═══',
+      '═══[S3 主体与强调层级]═══',
+      '═══[S4 角色DNA逐项核对]═══',
+      '═══[S5 服装与穿脱状态]═══',
+      '═══[S6 构图三问与镜头]═══',
+      '═══[S7 动作 + 五维表情 + 环境5层]═══',
+      '═══[S8 负面与互斥]═══',
+      '═══[S9~S10 最终核对]═══',
+    ]) {
+      expect(thinkingMsg?.content).toContain(stage);
     }
-    expect(thinkingMsg?.content).toContain('<角色名>｜表情｜视线｜本镜头可见服装｜临时状态｜个人动作');
-    expect(thinkingMsg?.content).toContain('确实不适用的槽位写 "-"');
-    expect(thinkingMsg?.content).toContain('核心动作、景别、表情、视线、场景、环境光、size 七项永远不得为 "-"');
-    // 表情/视线此前全库没有槽位,是「木脸」的根因;两个后端规范也要各带一份。
-    expect(thinkingMsg?.content).toContain('两项都不得留空，面无表情也要主动填 expressionless');
-    expect(thinkingMsg?.content).toContain('表情与视线填后端规范给出的标准 danbooru 词');
-    expect(thinkingMsg?.content).toContain('没有漏掉表情、视线或环境光');
-    // 不再发送 assistant 预填充,消息以 user 任务消息收尾。
     expect(thinkingMsg?.content).toContain('不得开启第二个 <thinking> 块');
-
-    // 以下是重写前就必须守住的既有约束,逐条确认没有在重构中丢失。
-    expect(thinkingMsg?.content).toContain('不得把临时状态恢复成角色默认值');
-    expect(thinkingMsg?.content).toContain('即使 images 为空也不能跳过这一步');
+    expect(thinkingMsg?.content).toContain('同人/原创三问判定');
+    expect(thinkingMsg?.content).toContain('Q1 摄像机在哪');
+    expect(thinkingMsg?.content).toContain('【五维表情】');
+    expect(thinkingMsg?.content).toContain('【环境5层】');
+    expect(thinkingMsg?.content).toContain('D1 极端特写');
+    expect(thinkingMsg?.content).toContain('UC/PC/NC');
+    expect(thinkingMsg?.content).toContain('面无表情也要填 expressionless');
+    expect(thinkingMsg?.content).toContain('只填规范标准 danbooru 词');
+    expect(thinkingMsg?.content).toContain('不得把临时状态恢复成默认值');
+    expect(thinkingMsg?.content).toContain('即使 images 为空也不能跳过建档与 changes');
     expect(thinkingMsg?.content).toContain('视觉明确度、剧情重要度、动作完整度');
     expect(thinkingMsg?.content).toContain('下限大于 0 时从较次但仍可见的候选中补足');
-    expect(thinkingMsg?.content).toContain('一次快门完整拍下');
-    // size 判定口径瘦身后只留在后端规范一份(thinking 与协议都不再复述),
-    // 但整套消息里必须仍有且有这一份,否则模型无从判断横竖。
+    expect(thinkingMsg?.content).toContain('单一快门能完整拍下');
     expect(messages.some(m => m.content.includes('双人近距离构图可写 portrait'))).toBe(true);
     expect(thinkingMsg?.content).not.toContain('双人近距离可 portrait');
-    expect(thinkingMsg?.content).toContain('只跳过没有视觉变化的对话');
-    expect(thinkingMsg?.content).toContain('首次出场就建档');
-    expect(thinkingMsg?.content).toContain('不论他是否入选本次图片');
+    expect(thinkingMsg?.content).toContain('跳过无视觉变化的纯对话');
+    expect(thinkingMsg?.content).toContain('首次出场输出 field:"new"');
     expect(thinkingMsg?.content).toContain('建档在本楼全程有效');
-    // 建档的 hair 必须带长度/发型:只写颜色的旧措辞会让模型以 black hair 过关。
     expect(thinkingMsg?.content).toContain('hair 必须同时带发色和长度/发型');
     expect(thinkingMsg?.content).not.toContain('hair 与 eyes 都不得留空');
-    // 白皙肤色词禁令(ComfyUI 默认肤色已够白,叠 pale skin 会白得失真):
-    // 规范给禁令,思维链第三层给落笔前的检查位;tan/dark skin 是豁免项。
+    // 白皙肤色词禁令与 tan/dark skin 豁免项
     expect(messages.some(m => m.content.includes('白皙词一律禁止'))).toBe(true);
-    expect(thinkingMsg?.content).toContain('白皙肤色词混进任何一张图');
-    expect(thinkingMsg?.content).toContain('tan、dark skin 不在此列');
-    // 建档字段的详细写法瘦身后只留在任务协议一份,thinking 不再复述。
+    expect(thinkingMsg?.content).toContain('pale skin、white skin、fair skin');
+    expect(thinkingMsg?.content).toContain('tan、dark skin');
     expect(messages.some(m => m.content.includes('建档写法：{"name":"角色名","field":"new"'))).toBe(true);
-    // 新旧档案的 position 语义、时代判断的发挥边界:瘦身后各自只留一份权威副本
-    // (分别在任务协议与后端规范),thinking 不再复述,但整套消息里必须仍在。
     expect(messages.some(m => m.content.includes('该位置之前的图片使用旧档案'))).toBe(true);
     expect(messages.some(m => m.content.includes('证据较少时可以合理补全时代风格'))).toBe(true);
     expect(thinkingMsg?.content).toContain('不得退回中性服装或默认现代都市');
-    expect(thinkingMsg?.content).toContain('把未知的场景事实具体化');
-    // 泥地/地形禁令原本 3 份(规范 + 槽位 + 自查),瘦身后规范留完整版、
-    // thinking 只留一句「没依据就别写」。outdoors/forest 的具体口径归规范。
+    expect(thinkingMsg?.content).toContain('未知场景事实具体化');
     expect(messages.some(m => m.content.includes('只确定“森林”时写 forest 即可'))).toBe(true);
     expect(messages.some(m => m.content.includes('不得为了丰富画面自行添加泥地、土路'))).toBe(true);
     expect(thinkingMsg?.content).toContain('没依据就别写');
-    expect(thinkingMsg?.content).toContain('没依据就删除');
-    expect(thinkingMsg?.content).toContain('只有名字实际列在【角色固定外貌库】区块中的才算已建档');
-    expect(thinkingMsg?.content).toContain('按正文 P 位置维护每个角色的临时服装');
     expect(thinkingMsg?.content).toContain('视觉指纹');
-    expect(thinkingMsg?.content).toContain('版型/剪裁 + 主色 + 关键部件');
+    expect(thinkingMsg?.content).toContain('版型/剪裁 + 主色 + 材质 + 关键部件');
     expect(thinkingMsg?.content).toContain('裤袜含颜色与透明度');
-    expect(thinkingMsg?.content).toContain('模型会自行重新设计的孤立词');
-    // 槽位侧同样要挡住笼统词,否则 C 段定了 navy school blazer、槽位里仍退回 school uniform。
-    expect(thinkingMsg?.content).toContain('槽位里不许退回 school uniform、dress、pantyhose 这种笼统孤立词');
-    expect(thinkingMsg?.content).toContain('多人画面每人的服装各写各的');
-    // 自查项要点名服装,上一版只提「表情视线」,模型自查时就只核对了表情视线。
-    expect(thinkingMsg?.content).toContain('没有谁的衣服只写在槽位里却没进 tag');
-    // 配角只写「弯腰换鞋」不写表情词 → tag 里他没有表情。角色行必须逐人写全英文词。
-    expect(thinkingMsg?.content).toContain('配角也要写全');
-    expect(thinkingMsg?.content).toContain('这一行没有表情词');
-    expect(thinkingMsg?.content).toContain('每个在场角色都各有一个绑定到自己的表情词和视线词');
-    // 超限重选必须发生在 E 段,不能等到第三层「让位」——那几块槽位是白写的。
-    expect(thinkingMsg?.content).toContain('写出 P 列表之前先数一遍');
-    expect(thinkingMsg?.content).toContain('这一层只核对、不改决定');
+    expect(thinkingMsg?.content).toContain('school uniform、dress、pantyhose 这类孤立词');
+    expect(thinkingMsg?.content).toContain('多人服装各写各的');
+    expect(thinkingMsg?.content).toContain('超出上限当场裁掉');
     expect(messages.some(m => m.content.includes('navy school blazer, white collared shirt, red ribbon'))).toBe(true);
-    expect(thinkingMsg?.content).toContain('镜头外不可见的部件可以省略，但省略不等于脱掉');
-    expect(thinkingMsg?.content).toContain('没有散落的无主特征');
+    expect(thinkingMsg?.content).toContain('镜头外不可见部件可省略但不等于脱掉');
+    expect(thinkingMsg?.content).not.toContain('characters');
     expect(messages.some(m => m.content.includes('每个在场正式角色必须二选一'))).toBe(true);
     expect(messages.some(m => m.content.includes('禁止把两人的外貌特征散放成无法归属的一串公共 tag'))).toBe(true);
-    expect(thinkingMsg?.content).toContain('定一套具体、自洽的时代/文明/视觉体系并全楼沿用');
+    expect(thinkingMsg?.content).toContain('确立一套具体自洽的时代/文明/视觉体系并全楼沿用');
     expect(messages.some(m => m.content.includes('必须先判断，并主动具体化'))).toBe(true);
     expect(messages.some(m => m.content.includes('具体不等于编造'))).toBe(true);
-    expect(messages.some(m => m.content.includes('不得为了丰富画面自行添加泥地、土路'))).toBe(true);
     expect(messages.some(m => m.content.includes('允许为了完成画面作合理猜测'))).toBe(false);
     const last = messages[messages.length - 1];
     expect(last.role).toBe('user');
@@ -433,54 +416,43 @@ describe('auto tag prompt', () => {
     const oldBackend = settings.defaultBackend;
     const oldModel = activeNaiPlan().model;
     try {
-      // ComfyUI:身份 tag 定词 + 括号转义提醒 + negative 条件自查(只有 Comfy 工作流会有
-      // negative 键);Comfy spec 无 NSFW 条款,思维链也不加。
+      // ComfyUI:身份 tag 定词 + 括号转义提醒 + negative 条件自查
       settings.defaultBackend = 'comfyui';
       let text = (await buildAutoTagMessages(context(), 1, options, null))
         .map(m => m.content)
         .join('\n');
-      expect(text).toContain('判定为同人时同一行定出最终身份 tag 词');
-      expect(text).toContain(
-        '每个同人角色的 tag 串里都有 B 段定下的 character name \\(copyright name\\) 身份 tag',
-      );
+      expect(text).toContain('同人/原创三问判定');
+      expect(text).toContain('同人带 character name \\(copyright name\\)');
       expect(text).toContain('若本图协议含 negative 键');
-      expect(text).not.toContain('若本图是显式 NSFW 场景');
-      // spec 的转义指导必须原样到达模型:模板字符串里 \( 会被烹饪成 (,
-      // 0.1.16 起这条实际发给模型的就是未转义括号,一直是坏的。
+      expect(text).not.toContain('显式 NSFW 场景须逐人点明');
       expect(text).toContain('实际提示词形态为 character name \\(copyright name\\)');
       expect(text).toContain('"character name \\\\(copyright name\\\\)"');
       expect(text).not.toContain('形态为 character name (copyright name)');
-      // 白皙肤色词禁令只给 ComfyUI:本地模型默认肤色已够白,再叠 pale skin 会白得失真。
       expect(text).toContain('白皙词一律禁止');
-      expect(text).toContain('白皙肤色词混进任何一张图');
+      expect(text).toContain('pale skin、white skin、fair skin');
 
-      // NAI 4 系:身份 tag 不转义 + 显式 NSFW 解剖落点(从有变无的回归,此处补回)。
-      // 负面词由后端按模型固定附加,AI 不写 negative——不该有 negative 条件自查。
+      // NAI 4.5 / V5:身份 tag 不转义 + 显式 NSFW 解剖落点;不引入 negative 条件自查和白皙肤色禁令。
       settings.defaultBackend = 'nai';
       activeNaiPlan().model = 'nai-diffusion-4-5-full';
       const nai45 = await buildAutoTagMessages(context(), 1, options, null);
       text = nai45.map(m => m.content).join('\n');
-      expect(text).toContain('判定为同人时同一行定出最终身份 tag 词');
+      expect(text).toContain('同人/原创三问判定');
       expect(text).toContain('不转义圆括号');
-      expect(text).toContain('若正文明确为显式 NSFW 场景');
-      expect(text).toContain('若本图是显式 NSFW 场景');
+      expect(text).toContain('显式 NSFW 逐人点明实际可见性器官');
+      expect(text).toContain('多人共同参与的性行为与接触点落入 Base 核心互动');
       expect(text).not.toContain('若本图协议含 negative 键');
-      // 「成年人」是 Comfy 专属成年自查条款的标记词;破限词(NVWA 核心)自身就含这个词,
-      // 故只查后端规范与思维链(messages[0] 恒为破限词)。
       expect(backendSpecAndThinking(nai45)).not.toContain('成年人');
-      // NAI 侧用户没有白痘问题,不引入这条禁令。
       expect(text).not.toContain('白皙肤色词');
       expect(text).not.toContain('白皙词一律禁止');
 
-      // NAI V5:身份 tag 落点是 characters[].tag 首位;NSFW 按 Base/角色块分工;
-      // contentRule 明令禁止 negative tags,不该有 negative 条件自查。
+      // NAI V5:身份 tag 落点是 characters[].tag 首位;NSFW 按 Base/角色块分工;无 negative 自查。
       activeNaiPlan().model = 'nai-diffusion-5-full';
       const nai5 = await buildAutoTagMessages(context(), 1, options, null);
       text = nai5.map(m => m.content).join('\n');
-      expect(text).toContain('身份 tag 必须写进档案');
-      expect(text).toContain('每个同人角色的身份 tag 都逐字照抄自档案 fandom 字段');
-      expect(text).toContain('若正文明确为显式 NSFW 场景');
-      expect(text).toContain('若本图是显式 NSFW 场景');
+      expect(text).toContain('写入 fields.fandom 或补发 field:"fandom" 的 changes');
+      expect(text).toContain('放该角色 characters[].tag 首位且不进 Base');
+      expect(text).toContain('显式 NSFW 逐人点明实际可见性器官');
+      expect(text).toContain('多人共同参与的性行为与接触点落入 Base 核心互动');
       expect(text).not.toContain('若本图协议含 negative 键');
       expect(backendSpecAndThinking(nai5)).not.toContain('成年人');
       expect(text).not.toContain('白皙肤色词');
@@ -522,28 +494,17 @@ describe('auto tag prompt', () => {
         expect([banned, text.includes(banned)]).toEqual([banned, false]);
       }
 
-      // 取而代之的是 Base 块 + 每角色块。
-      expect(text).toContain('■ P<编号>｜Base');
-      expect(text).toContain('■ P<编号>｜<角色名或正文指称>');
-      // 角色块按取景框、不按档案:块名允许正文指称,固定外貌槽给【一次性】留了合法填法。
-      // 旧口径「照抄库中/刚建档的字段」是唯一来源,无名角色在这个槽位上无路可走——
-      // 于是模型宁可放弃画面(见「无名角色入画」问题文档),这条钉死不再回流。
-      expect(text).toContain('【一次性】角色用正文的指称原词作块名');
+      // 取而代之的是 Base 层 + 个体角色块。
+      expect(text).toContain('**Base 层**（仅放全局，严禁混入单人外貌/服装/个人动作');
+      expect(text).toContain('**个体角色块**（每个本图可见的个体角色各写一块，含【一次性】角色');
+      expect(text).toContain('用正文指称原词作 name 绝不为他编造人名');
       expect(text).toContain('【一次性】按世界观一次性补全');
-      expect(text).toContain('不要用邻接绑定');
-      expect(text).toContain('Base 块与角色块的分工是硬边界');
-      expect(text).toContain('落 JSON 时进他自己的 characters[].tag');
-      // 单人画面没有多人互动:核心互动槽写 "-",唯一角色的动作进他角色块的个人动作——
-      // 旧口径让单人接触点写进 Base 槽,与「个人动作只进角色块」的分工规则直接打架。
-      expect(text).toContain('单人画面本槽写 "-"');
+      expect(text).toContain('严禁把某人特征挂到别人发色后面的邻接绑定');
+      expect(text).toContain('多人核心互动（单人画面写 "-"）');
       expect(text).not.toContain('单人画面写该角色与场景/道具的接触点');
-      // 第三层逐槽点名核对:实跑里模型把环境光丢了、自查却声称「覆盖了全部槽位」。
-      // 点名清单必须含多人画面的核心互动——只在单人画面才允许 "-" 跳过。
-      expect(text).toContain('逐槽核对过');
-      expect(text).toContain('环境光不许漏');
-      expect(text).toContain('多人画面的核心互动');
-      // 服装视觉指纹与协议形态无关,三份思维链都要保住。
-      expect(text).toContain('槽位里不许退回 school uniform、dress、pantyhose 这种笼统孤立词');
+      expect(text).toContain('Base 与各角色边界干净');
+      expect(text).toContain('【环境5层（进 Base）】');
+      expect(text).toContain('拒绝退回 school uniform、dress、pantyhose 这类孤立词');
     } finally {
       settings.defaultBackend = oldBackend;
       activeNaiPlan().model = oldModel;
@@ -572,9 +533,9 @@ describe('auto tag prompt', () => {
       const messages = await buildAutoTagMessages(context(), 1, options, null);
       const text = messages.map(m => m.content).join('\n');
 
-      // ① 第一层 B 清点「谁在场」而不是「谁有档案」,并逐人标出三类身份。
-      expect(text).toContain('逐个列出实际在场的**全部**角色');
-      expect(text).toContain('清点的是「谁在场」，不是「谁有档案」');
+      // ① 【1】清点实际在场的全部个体，并标出三类身份。
+      expect(text).toContain('清点实际在场的全部个体');
+      expect(text).toContain('清点名单不是入画名单');
       expect(text).toContain('【一次性】');
       expect(text).not.toContain('逐个列出实际在场且有名有姓的角色');
 
@@ -608,7 +569,7 @@ describe('auto tag prompt', () => {
 
       // C 段连坐:名单放宽后,不排除【一次性】会让模型给一次性对手维护服装时间线——
       // 白烧 token,更糟的是强化「他是正经角色」的暗示,反过来诱发建档。
-      expect(text).toContain('【一次性】角色不在本段占行');
+      expect(text).toContain('【一次性】角色不维护跨图账本');
 
       // 示例本身曾是反面教材:Base 写 2girls 却只给一条 Character Prompt,
       // 正好演示了「另一个人没有落位」。示例必须演示要求的行为。
@@ -642,7 +603,7 @@ describe('auto tag prompt', () => {
         const contract = messages.find(m => m.content.startsWith('你是严谨的剧情画面规划'))!.content;
         const thinking = messages.find(m => m.content.startsWith('【输出前思考清单】'))!.content;
         const spec = messages.find(m => m.content.startsWith('[NovelAI'))!.content;
-        const selection = thinking.split('E. 选段\n')[1].split('第二层｜')[0];
+        const selection = thinking.split('【0】选段与世界观\n')[1].split('【1】角色清点')[0];
 
         expect(contract).toContain('优先表现正文中玩家主角和主要角色的表情、状态、行动及关系');
         expect(contract).toContain('主要角色单独出镜同样成立');
@@ -926,7 +887,6 @@ describe('auto tag prompt', () => {
     }
   });
 
-  // 槽位本身也要挡住中文描述,否则先漏进槽位再漏进 tag。
   it('makes the per-image slot block demand canonical danbooru expression words', async () => {
     const options: AutoTagSettings = {
       enabled: true,
@@ -939,24 +899,17 @@ describe('auto tag prompt', () => {
     };
     const messages = await buildAutoTagMessages(context(), 1, options, null);
     const thinkingMsg = messages.find(m => m.content.includes('输出前思考清单'));
-    expect(thinkingMsg?.content).toContain('不写中文感受也不自创词组（想写「温柔地笑」就填 smile）');
-    expect(thinkingMsg?.content).toContain('多人画面每人各填一份');
-    expect(thinkingMsg?.content).toContain('另一人变成默认木脸');
-    // 连着两轮实跑都没照抄 ■ 格式,但七个槽位一项没漏——防漏的目的已达成,
-    // 形状不是目的。故意不钉「■ 单独成行」这类形态断言,只钉槽位齐全。
-    expect(thinkingMsg?.content).toContain('七个槽位一个都不能少');
-    // 摇摆的可执行判据:抽象的「别反复权衡」模型每次都觉得自己没在权衡。
-    expect(thinkingMsg?.content).toContain('同一个字段在整个 <thinking> 里只准出现一次取值');
-    // 不写推演过程的约束保留,但不设字数硬上限——上限会逼着模型为多图多人场景压缩建档判断。
+    expect(thinkingMsg?.content).toContain('只填规范标准 danbooru 词，不写中文感受也不自创词组');
+    expect(thinkingMsg?.content).toContain('每名在场角色包括配角均逐人独立填写并绑定');
+    expect(thinkingMsg?.content).toContain('面无表情也要填 expressionless');
+    expect(thinkingMsg?.content).toContain('【五维表情】');
     expect(thinkingMsg?.content).not.toContain('800 字');
-    expect(thinkingMsg?.content).toContain('带问号的自问');
-    expect(thinkingMsg?.content).toContain('并列候选');
-    // 第三层曾自称「落成 tag」,与「不要预写 tag 串」直接打架,实跑里 tag 被写了四遍。
-    expect(thinkingMsg?.content).toContain('第三层｜落笔前自查');
-    // 上一版只禁「完整 tag/nl 串」,模型钻空子改成在 thinking 里预写整个 JSON 对象
-    // (末尾一句 "JSON:" 加一份完整答案),白烧约 800 token。措辞要覆盖 JSON 本身。
-    expect(thinkingMsg?.content).toContain('不写完整 tag 串、不写完整 nl 句、更不要写出 JSON 对象');
+    expect(thinkingMsg?.content).toContain('不写「A？还是 B？」式自问与并列候选');
+    expect(thinkingMsg?.content).toContain('═══[S9~S10 最终核对]═══');
+    expect(thinkingMsg?.content).toContain('不在 <thinking> 内预写完整 tag 串、完整 nl 句或 JSON 对象');
     expect(thinkingMsg?.content).toContain('答案只在 </thinking> 之后出现一次');
+    expect(thinkingMsg?.content).not.toContain('第一层｜全局判断（整楼各做一次）');
+    expect(thinkingMsg?.content).not.toContain('第二层｜逐张图槽位块');
     expect(thinkingMsg?.content).not.toContain('第三层｜落成 tag 并自查');
     expect(thinkingMsg?.content).not.toContain('逐条转成 tag/nl');
   });
@@ -1295,7 +1248,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       expect(all).not.toContain('images 数量必须');
       expect(all).not.toContain('"nl":');
       expect(all).toContain('【MOSS 漫画规范】');
-      expect(all).toContain('逐页分镜');
+      expect(all).toContain('逐页导演分镜');
       // 建档口径与插画共用
       expect(all).toContain('建档先于画图');
 
@@ -1449,10 +1402,17 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       DEFAULT_COMFY_COMIC_THINKING,
     ]) {
       expect(text).toContain('导演思维链顺序');
+      expect(text).toContain('全局规划（整楼只做一次，以下【0】～【2】一次定死）');
       expect(text).toContain('同人/原创三问判定');
-      expect(text).toContain('接触点');
+      expect(text).toContain('构图三问');
+      expect(text).toContain('五维表情');
+      expect(text).toContain('环境5层');
+      expect(text).toContain('D1~D7');
       expect(text).toContain('UC/PC/NC');
       expect(text).toContain('镜头变化不能替代故事状态变化');
+      expect(text).toContain('最终核对]═══');
+      expect(text).not.toContain('第一层｜全局判断');
+      expect(text).not.toContain('第二层｜逐张图槽位块');
       expect(text).not.toContain('肉棒');
       expect(text).not.toContain('$调用$');
       expect(text).not.toContain('<disclaimer>');
@@ -1465,7 +1425,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     }
     for (const illuText of [DEFAULT_COMFY_THINKING, DEFAULT_NAI_THINKING, DEFAULT_NAI_V5_THINKING]) {
       expect(illuText).toContain('上一图结束什么状态，本图就从什么状态开始');
-      expect(illuText).toContain('画面信息量与导演自查（S9/S10）');
+      expect(illuText).toContain('画面信息量与导演自查');
     }
   });
 });
