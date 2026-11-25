@@ -1,0 +1,12 @@
+{
+  "display_name": "柏宝·改",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "dist/index.js?ver=0.1.0",
+  "author": "柏宝·改",
+  "version": "0.1.0",
+  "homePage": "",
+  "auto_update": false,
+  "minimum_client_version": "1.12.13"
+}
