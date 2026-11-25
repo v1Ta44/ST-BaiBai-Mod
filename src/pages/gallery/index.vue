@@ -11,6 +11,7 @@ import { mapLimit } from '@/pool';
 import { getContext } from '@/st/context';
 import { formatPromptText, parseImageTagContent } from '@/st/imageTagRegex';
 import { ARTIST_PREVIEW_FOLDER, listUserImageFolders, listUserImages, probeUserImage } from '@/st/images';
+import { ORIGINAL_ARTIST_PREVIEW_FOLDER, ORIGINAL_FOLDER_PREFIX } from '@/sync/baibaiImageImport';
 import { computed, onMounted, ref } from 'vue';
 
 /**
@@ -53,6 +54,8 @@ interface GalleryImage {
   src: string;
   /** 另存文件名 */
   download: string;
+  /** 原版柏宝绘目录下的图片为只读，不允许在图库页删除 */
+  readonly: boolean;
 }
 
 interface GalleryGroup {
@@ -60,6 +63,7 @@ interface GalleryGroup {
   folder: string;
   /** 展示用角色名(去前缀) */
   name: string;
+  source: 'mod' | 'original';
   images: GalleryImage[];
 }
 
@@ -136,8 +140,16 @@ function seedPromptsFromChat(): void {
  * 任何失败(404 / 超时 / 不是 JSON)都返回 null 静默降级:老图本来就没有侧写,
  * 那是预期内的常态,不该报错也不该拦住灯箱。
  */
+/** 兼容原版柏宝绘（bbi_*）图片侧写路径（仅图库只读展示使用）。 */
+function originalSidecarPathFor(imagePath: string): string {
+  const file = imagePath.split('/').pop() ?? '';
+  if (!/^bbi_[a-zA-Z0-9_]+-[a-zA-Z0-9]+\.[a-z0-9]+$/i.test(file)) return '';
+  const base = file.replace(/\.[^./]*$/, '');
+  return `/user/files/${base}.json`;
+}
+
 async function fetchSidecarPrompt(imagePath: string): Promise<string | null> {
-  const sidecar = sidecarPathFor(imagePath);
+  const sidecar = sidecarPathFor(imagePath) || originalSidecarPathFor(imagePath);
   if (!sidecar) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SIDECAR_TIMEOUT_MS);
@@ -164,7 +176,10 @@ async function load(): Promise<void> {
     // 只列 /folders 报上来的目录:/api/images/list 对不存在的目录会 mkdir,
     // 凭空猜名字会在 user/images 下攒出空文件夹。
     const folders = (await listUserImageFolders()).filter(
-      folder => folder.startsWith(FOLDER_PREFIX) && folder !== ARTIST_PREVIEW_FOLDER,
+      folder =>
+        (folder.startsWith(FOLDER_PREFIX) || folder.startsWith(ORIGINAL_FOLDER_PREFIX)) &&
+        folder !== ARTIST_PREVIEW_FOLDER &&
+        folder !== ORIGINAL_ARTIST_PREVIEW_FOLDER,
     );
     const settled = await Promise.allSettled(
       folders.map(async folder => ({ folder, files: await listUserImages(folder) })),
@@ -179,25 +194,32 @@ async function load(): Promise<void> {
       }
       const { folder, files } = result.value;
       if (!files.length) return; // 删空后的残留目录不占位
-      const name = folder.slice(FOLDER_PREFIX.length) || '未命名角色';
+      const source: GalleryGroup['source'] = folder.startsWith(ORIGINAL_FOLDER_PREFIX) ? 'original' : 'mod';
+      const prefix = source === 'original' ? ORIGINAL_FOLDER_PREFIX : FOLDER_PREFIX;
+      const name = folder.slice(prefix.length) || '未命名角色';
       next.push({
         folder,
         name,
+        source,
         images: files.map(file => ({
           file,
           key: `user/images/${folder}/${file}`,
           src: imageSrc(folder, file),
           download: downloadName(name, file),
+          readonly: source === 'original',
         })),
       });
     });
 
-    // 当前聊天角色排最前,其余按名字排序——刚生成的图不用翻着找。
+    // 当前聊天角色排最前,其余按名字排序（同名时柏宝·改排在原版柏宝绘前面）。
     const current = getContext()?.name2?.trim() ?? '';
     const collator = new Intl.Collator('zh-Hans-CN');
     next.sort((a, b) => {
       const rank = Number(b.name === current) - Number(a.name === current);
-      return rank || collator.compare(a.name, b.name);
+      if (rank) return rank;
+      const nameCmp = collator.compare(a.name, b.name);
+      if (nameCmp) return nameCmp;
+      return Number(a.source === 'original') - Number(b.source === 'original');
     });
     groups.value = next;
     // ⚠ 暂时禁用分组体积统计:作者不满意当前方案——逐张 HEAD 读 Content-Length,
@@ -380,6 +402,7 @@ function toggleSelecting(): void {
 }
 
 function toggleSelected(image: GalleryImage): void {
+  if (image.readonly) return;
   const next = new Set(selected.value);
   if (next.has(image.key)) next.delete(image.key);
   else next.add(image.key);
@@ -400,15 +423,23 @@ function someSelected(group: GalleryGroup): boolean {
  * 用户说「全选这个角色」指的是这个角色的全部图片,不该因为没往下翻而少选。
  */
 function toggleGroup(group: GalleryGroup): void {
+  if (group.source === 'original') return;
   const next = new Set(selected.value);
-  if (groupAllSelected(group)) group.images.forEach(image => next.delete(image.key));
-  else group.images.forEach(image => next.add(image.key));
+  if (groupAllSelected(group)) {
+    group.images.forEach(image => {
+      if (!image.readonly) next.delete(image.key);
+    });
+  } else {
+    group.images.forEach(image => {
+      if (!image.readonly) next.add(image.key);
+    });
+  }
   selected.value = next;
 }
 
 /** 点图:选择态勾选,否则放大。 */
 function onThumbClick(image: GalleryImage): void {
-  if (selecting.value) toggleSelected(image);
+  if (selecting.value && !image.readonly) toggleSelected(image);
   else void open(image);
 }
 
@@ -422,7 +453,7 @@ async function deleteSelected(): Promise<void> {
   if (!selectedCount.value || deleting.value) return;
   const targets = groups.value
     .flatMap(group => group.images)
-    .filter(image => selected.value.has(image.key));
+    .filter(image => !image.readonly && selected.value.has(image.key));
   if (!targets.length) return;
 
   const ok = await confirmDialog({
@@ -592,7 +623,7 @@ async function open(image: GalleryImage): Promise<void> {
              放整组全选的复选框,而 <button> 里不能嵌 <button>/<input>(HTML 非法且
              点击会双触发)。故折叠触发器单独是一颗按钮,复选框与它并排。 -->
         <div class="gal-fold-head">
-          <label v-if="selecting" class="gal-group-check" :title="`全选${group.name}`">
+          <label v-if="selecting && group.source !== 'original'" class="gal-group-check" :title="`全选${group.name}`">
             <input
               type="checkbox"
               class="bbi-checkbox"
@@ -611,6 +642,7 @@ async function open(image: GalleryImage): Promise<void> {
           >
             <Icon name="chevron" class="gal-caret" :class="{ 'is-collapsed': !expanded.has(group.folder) }" />
             <span class="gal-name">{{ group.name }}</span>
+            <span v-if="group.source === 'original'" class="gal-src-badge">柏宝绘</span>
             <span class="gal-badge">{{ group.images.length }}</span>
             <span v-if="groupSizeText(group)" class="gal-size">{{ groupSizeText(group) }}</span>
           </button>
@@ -629,17 +661,17 @@ async function open(image: GalleryImage): Promise<void> {
                     class="gal-thumb"
                     :class="{
                       'is-busy': pending === image.key,
-                      'is-selectable': selecting,
-                      'is-selected': selecting && selected.has(image.key),
+                      'is-selectable': selecting && !image.readonly,
+                      'is-selected': selecting && !image.readonly && selected.has(image.key),
                     }"
                     type="button"
-                    :title="selecting ? image.file : `放大 ${image.file}`"
-                    :aria-pressed="selecting ? selected.has(image.key) : undefined"
+                    :title="selecting && !image.readonly ? image.file : `放大 ${image.file}`"
+                    :aria-pressed="selecting && !image.readonly ? selected.has(image.key) : undefined"
                     @click="onThumbClick(image)"
                   >
                     <img class="gal-img" :src="image.src" :alt="`${group.name} 的生成图`" loading="lazy" />
                     <!-- 勾选角标:只在选择态出现,选中时填充主色 -->
-                    <span v-if="selecting" class="gal-check" aria-hidden="true">
+                    <span v-if="selecting && !image.readonly" class="gal-check" aria-hidden="true">
                       <Icon v-if="selected.has(image.key)" name="check" :size="13" />
                     </span>
                   </button>
@@ -879,6 +911,16 @@ async function open(image: GalleryImage): Promise<void> {
   font-weight: 600;
   color: var(--bbi-ink);
   word-break: break-word;
+}
+.gal-src-badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: var(--bbi-radius-pill);
+  border: 1px solid var(--bbi-line-strong);
+  color: var(--bbi-ink-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.6;
 }
 .gal-badge {
   flex: 0 0 auto;

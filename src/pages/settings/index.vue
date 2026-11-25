@@ -5,6 +5,7 @@ import Collapsible from '@/components/Collapsible.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
+import BaibaiImageImportModal from '@/pages/settings/BaibaiImageImportModal.vue';
 import { fetchModels, testChannel } from '@/api/client';
 import { listAvailableWorldBooks, type WorldBookSummary } from '@/autoTag/context';
 import { detectDangerousRegex, parseWordReplaceRules, runSafeRegex } from '@/autoTag/textPreprocess';
@@ -35,6 +36,8 @@ import {
 } from '@/state/ui';
 import { checkForUpdate, performUpdate, updateState } from '@/update';
 import { computed, nextTick, onMounted, ref } from 'vue';
+
+const importModalOpen = ref(false);
 
 const NAV_OPTIONS: { value: NavPosition; label: string }[] = [
   { value: 'auto', label: '自动' },
@@ -730,6 +733,18 @@ async function confirmUpdate() {
         </Collapsible>
       </Collapsible>
 
+      <!-- 从原版柏宝绘单向导入 -->
+      <Collapsible title="从柏宝绘导入" :open="false">
+        <p class="bbi-field-hint">
+          从同一酒馆中的原版「柏宝绘」单向复制画师串、接入点、Vibe、出图方案、ComfyUI 配置或全局角色库到当前插件，不影响原版数据。副 API 渠道与排除名单本就自动共享，无需重复导入。
+        </p>
+        <div class="bbm-import-entry">
+          <button class="bbi-btn bbi-btn-sm" type="button" @click="importModalOpen = true">
+            <Icon name="download" /> 选择要导入的数据…
+          </button>
+        </div>
+      </Collapsible>
+
       <!-- 副 API:生成画图 tag 用的模型渠道(与柏宝书共享渠道列表) -->
       <Collapsible title="副 API" :open="false">
         <div class="bbi-tag-gen-mode">
@@ -1397,6 +1412,7 @@ async function confirmUpdate() {
       当前版本 v{{ updateState.current || '—' }},最新版本 v{{ updateState.latest }}。<br />
       现在更新吗?更新完成后会自动刷新页面生效。
     </ConfirmDialog>
+    <BaibaiImageImportModal :open="importModalOpen" @close="importModalOpen = false" />
   </section>
 </template>
 
@@ -2030,5 +2046,8 @@ async function confirmUpdate() {
   white-space: pre-wrap;
   max-height: 180px;
   overflow-y: auto;
+}
+.bbm-import-entry {
+  margin-top: 10px;
 }
 </style>

@@ -436,3 +436,33 @@ describe('gallery multi-select delete', () => {
     expect(String(box.props.class ?? '')).toContain('bbi-checkbox');
   });
 });
+
+describe('original 柏宝绘_ folders (readonly)', () => {
+  const origAlpha = '\u67cf\u5b9d\u7ed8_Alpha';
+
+  it('lists original folders sorted after mod folders with badge and blocks selection/deletion', async () => {
+    vi.mocked(listUserImageFolders).mockResolvedValue([origAlpha, alpha, '\u67cf\u5b9d\u7ed8_\u753b\u5e08\u4e32']);
+    vi.mocked(listUserImages).mockImplementation(async folder =>
+      folder === origAlpha ? ['bbi_a_0_b-g1.png'] : ['image-0.png'],
+    );
+
+    const root = await mount();
+    // 原版画师串预览目录被过滤，只剩 2 组且 mod 在前、original 在后
+    expect(find(root, '.gal-name').map(text)).toEqual(['Alpha', 'Alpha']);
+    expect(find(root, '.gal-src-badge').map(text)).toEqual(['柏宝绘']);
+
+    await click(find(root, '.gal-select-toggle')[0]);
+    // 只有 mod 组有整组全选框
+    expect(find(root, '.gal-group-check')).toHaveLength(1);
+
+    // 展开原版组并在选择态点击图片：直接开灯箱，不选中，不删除
+    await click(find(root, '.gal-fold-trigger')[1]);
+    const origThumb = find(root, '.gal-thumb')[0];
+    expect(String(origThumb.props.class ?? '')).not.toContain('is-selectable');
+    await click(origThumb);
+    await flush();
+    expect(vi.mocked(openLightbox)).toHaveBeenCalledTimes(1);
+    expect(text(find(root, '.gal-actionbar-count')[0])).toContain('0');
+    expect(vi.mocked(deleteImageFileOnly)).not.toHaveBeenCalled();
+  });
+});

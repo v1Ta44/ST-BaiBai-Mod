@@ -7,6 +7,7 @@
 1. **独立命名空间与双向兼容**
    - 拥有完全独立的扩展设置键（`baibai_mod`）、DOM 宿主（`#bbm-app-host`）、生图标签（`<bbm_image>` / `div[data-bbm-slot]`）、人物档案字段（`bbmCharChanges`）与图库目录前缀（`柏宝改_`），可与原版柏宝绘并存安装。
    - **完全兼容原版「柏宝书 (`STBaiBaiBook`)」记忆**、共享副 API 渠道库（`extensionSettings['baibai_api_channels']`）与共享排除名单（`extensionSettings['baibai_exclude_settings']`）。
+   - 支持从同宿主原版「柏宝绘」按条目手动导入 NAI 画师串、接入点、Vibe、出图方案、ComfyUI 库与全局角色库，图库页可只读浏览原版图片。
 2. **纯浏览器直连 OpenAI 兼容协议**
    - 直接由浏览器向 OpenAI 兼容 `/chat/completions` 与 `/models` 发起请求，不经酒馆服务端代理、不依赖酒馆主 API / ST 预设管线。
    - 支持单渠道独立参数开关（`temperature`、`top_p`、`max_tokens`、`stream`、`excludeParams`）以及自定义 JSON 请求头与额外请求体参数。

@@ -2313,3 +2313,12 @@ watch(
   },
   { deep: true },
 );
+
+/** 供外部导入流程（如从原版柏宝绘导入）复用现有 NAI / ComfyUI 清洗逻辑，不修改当前设置。 */
+export function normalizeForeignNai(raw: unknown): NaiSettings {
+  return normalizeNai(raw, naiDefaults());
+}
+
+export function normalizeForeignComfy(raw: unknown): ComfyUISettings {
+  return normalizeComfyUI(raw, comfyDefaults());
+}
