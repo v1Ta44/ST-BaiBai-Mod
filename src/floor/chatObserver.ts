@@ -12,19 +12,90 @@
  * 才动 DOM,别在里面做全量重建。
  */
 
-type ChatMutationListener = () => void;
+type ChatMutationListener = (dirtyFloors: ReadonlySet<number>) => void;
 
 const listeners = new Set<ChatMutationListener>();
+const pendingDirtyFloors = new Set<number>();
 
 let observer: MutationObserver | null = null;
 let scheduled = false;
 
+function isPluginOwnedNode(node: Node): boolean {
+  if (node.nodeType !== 1) return false;
+  const el = node as Element;
+  return Boolean(
+    el.hasAttribute?.('data-bbm-slot')
+    || el.classList?.contains?.('bbm-fallback-slots')
+    || el.classList?.contains?.('bbm-tag-action'),
+  );
+}
+
+function addFloorFromMes(mes: Element | null | undefined): void {
+  const raw = mes?.getAttribute?.('mesid');
+  if (raw === null || raw === undefined || raw.trim() === '') return;
+  const id = Number(raw);
+  if (Number.isInteger(id) && id >= 0) pendingDirtyFloors.add(id);
+}
+
+function collectDirtyFloors(records: MutationRecord[]): boolean {
+  let hasExternalMutation = false;
+
+  for (const record of records) {
+    const hasNodes = record.addedNodes.length > 0 || record.removedNodes.length > 0;
+    if (hasNodes) {
+      let allPluginOwned = true;
+      for (const n of record.addedNodes) {
+        if (!isPluginOwnedNode(n)) {
+          allPluginOwned = false;
+          break;
+        }
+      }
+      if (allPluginOwned) {
+        for (const n of record.removedNodes) {
+          if (!isPluginOwnedNode(n)) {
+            allPluginOwned = false;
+            break;
+          }
+        }
+      }
+      if (allPluginOwned) continue;
+    }
+
+    hasExternalMutation = true;
+    const targetEl =
+      record.target.nodeType === 1
+        ? (record.target as Element)
+        : record.target.parentElement;
+    const enclosingMes = targetEl?.closest?.('.mes[mesid]');
+    if (enclosingMes) {
+      addFloorFromMes(enclosingMes);
+      continue;
+    }
+
+    for (const node of record.addedNodes) {
+      if (node.nodeType !== 1) continue;
+      const el = node as Element;
+      if (el.classList?.contains?.('mes')) addFloorFromMes(el);
+      if (typeof el.querySelectorAll === 'function') {
+        for (const childMes of el.querySelectorAll('.mes[mesid]')) {
+          addFloorFromMes(childMes);
+        }
+      }
+    }
+  }
+
+  return hasExternalMutation;
+}
+
 function flush(): void {
   scheduled = false;
+  const dirtySnapshot = new Set(pendingDirtyFloors);
+  pendingDirtyFloors.clear();
+
   for (const listener of listeners) {
     // 一个订阅者抛异常不能连坐其它订阅者(尤其别让它把自愈整条链路带走)
     try {
-      listener();
+      listener(dirtySnapshot);
     } catch (error) {
       console.error('[柏宝绘] #chat 变更回调异常', error);
     }
@@ -40,7 +111,8 @@ export function ensureChatObserver(): boolean {
   const chat = document.getElementById('chat');
   if (!chat) return false;
 
-  observer = new MutationObserver(() => {
+  observer = new MutationObserver(records => {
+    if (!collectDirtyFloors(records)) return;
     if (scheduled) return;
     scheduled = true;
     requestAnimationFrame(flush);

@@ -7,12 +7,17 @@ import { onChatMutation } from '@/floor/chatObserver';
 import { setNaiConcurrency } from '@/floor/genQueue';
 import { clearAllGen, pruneGenSlots } from '@/floor/genState';
 import { clearAllTagPlans } from '@/floor/tagPlanState';
-import { resolveFloorAnchors } from '@/floor/penetrate';
+import { collectFloorIframes, resolveFloorAnchors } from '@/floor/penetrate';
 import { SlotRegistry } from '@/floor/registry';
 import { checkSlotHealth, floorIdOf } from '@/floor/slotHealth';
 import { historyEntries, latestStaleEntry, promptHash, readStore } from '@/floor/storage';
 import { getContext, type STContext } from '@/st/context';
-import { imageTagKind, parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
+import {
+  hasImageTagTrace,
+  imageTagKind,
+  parseImageTagContent,
+  parseImageTags,
+} from '@/st/imageTagRegex';
 import { settings } from '@/state/settings';
 
 /**
@@ -35,11 +40,6 @@ import { settings } from '@/state/settings';
  * 右滑生成写 `.mes_text.html('...')`。锚点活在 .mes_text **里面**,这些路径一律
  * 把它连同 shadow root 一起删掉,而事件层对此完全无感。用户报的
  * 「图在生成、楼层里看不到界面」就是它——genState 是模块级的,卡片死了生成照样跑完。
- *
- * 相邻的柏宝书没这个毛病,不是因为它更结实,是因为它的宿主挂在 .mes_text **外面**
- * 当兄弟节点,`.html()`/`.empty()` 只清 innerHTML,碰不到兄弟。而本插件的卡片必须
- * 落在 tag 的行内位置(多 tag 楼层要按位置分别成图),搬不出去——同一条约束下
- * 当初也否掉了官方 extra.media 方案(architecture.md §6)。故自愈是位置约束下的唯一解。
  */
 
 export const slotRegistry = new SlotRegistry();
@@ -49,8 +49,6 @@ let healingBound = false;
 
 /**
  * 可继承的排版属性——shadow DOM 不隔离继承，这些会透过 host 从 ST 漏进来。
- * 与 index.ts 的 INHERITED_RESET 同一份职责（那里是主窗口 host，这里是每张卡片 host）；
- * 卡片要**跟随聊天字号**故不钉 font-size，只钉会破坏布局与配色的那些。
  */
 const CARD_INHERITED_RESET: Record<string, string> = {
   'font-style': 'normal',
@@ -68,11 +66,79 @@ const CARD_INHERITED_RESET: Record<string, string> = {
 };
 
 /**
- * 备好锚点的 shadow root:挂样式 + 钉死继承属性(幂等)。
+ * 宿主 CSS 护甲：防止正文美化 `div:empty { display:none }`、横排 flex 压缩或高度裁切把卡片隐藏。
+ */
+const CARD_HOST_ARMOR: Record<string, string> = {
+  display: 'block',
+  visibility: 'visible',
+  opacity: '1',
+  position: 'relative',
+  float: 'none',
+  clear: 'both',
+  width: '100%',
+  'max-width': '100%',
+  'min-width': '0',
+  height: 'auto',
+  'min-height': '0',
+  'max-height': 'none',
+  margin: '8px 0',
+  padding: '0',
+  border: '0',
+  background: 'transparent',
+  overflow: 'visible',
+  clip: 'auto',
+  'clip-path': 'none',
+  transform: 'none',
+  'pointer-events': 'auto',
+  'box-sizing': 'border-box',
+  flex: '0 0 auto',
+  'align-self': 'stretch',
+  'font-size': '13px',
+};
+
+const SMART_THEME_VARS = [
+  '--SmartThemeBlurTintColor',
+  '--SmartThemeChatTintColor',
+  '--SmartThemeBodyColor',
+  '--SmartThemeQuoteColor',
+  '--SmartThemeBorderColor',
+  '--SmartThemeShadowColor',
+] as const;
+
+function syncHostThemeVars(anchor: HTMLElement): void {
+  try {
+    const rootStyle = getComputedStyle(document.documentElement);
+    for (const name of SMART_THEME_VARS) {
+      const val = rootStyle.getPropertyValue(name).trim();
+      if (val) anchor.style.setProperty(name, val);
+    }
+  } catch {
+    // 忽略无样式环境
+  }
+}
+
+function injectFallbackStyle(shadow: ShadowRoot, doc: Document): void {
+  const style = doc.createElement('style');
+  style.textContent = cardStyleTextFallback();
+  shadow.appendChild(style);
+}
+
+/**
+ * 备好锚点的 shadow root:挂样式 + 钉死继承属性与宿主护甲(幂等)。
  * 锚点每次楼层渲染都是新元素,但 MESSAGE_UPDATED 等事件下也可能复用同一元素,
  * 故 attachShadow 前先查 shadowRoot——重复 attach 会抛。
  */
 function ensureShadow(anchor: HTMLElement): ShadowRoot {
+  for (const [prop, value] of Object.entries(CARD_INHERITED_RESET)) {
+    anchor.style.setProperty(prop, value, 'important');
+  }
+  for (const [prop, value] of Object.entries(CARD_HOST_ARMOR)) {
+    anchor.style.setProperty(prop, value, 'important');
+  }
+  if (anchor.ownerDocument !== document) {
+    syncHostThemeVars(anchor);
+  }
+
   const existing = anchor.shadowRoot;
   if (existing) return existing;
 
@@ -80,18 +146,16 @@ function ensureShadow(anchor: HTMLElement): ShadowRoot {
   const doc = anchor.ownerDocument || document;
   const sheet = cardStyleSheet(doc);
   if (sheet) {
-    // 同 Document 下全部卡片共享同一个 CSSStyleSheet 对象
-    shadow.adoptedStyleSheets = [sheet];
+    try {
+      // 同 Document 下全部卡片共享同一个 CSSStyleSheet 对象
+      shadow.adoptedStyleSheets = [sheet];
+    } catch {
+      injectFallbackStyle(shadow, doc);
+    }
   } else {
-    // 老浏览器兜底:每个 shadow 一份 <style>
-    const style = doc.createElement('style');
-    style.textContent = cardStyleTextFallback();
-    shadow.appendChild(style);
+    injectFallbackStyle(shadow, doc);
   }
 
-  for (const [prop, value] of Object.entries(CARD_INHERITED_RESET)) {
-    anchor.style.setProperty(prop, value, 'important');
-  }
   return shadow;
 }
 
@@ -100,9 +164,69 @@ function findMesText(messageId: number): HTMLElement | null {
   return document.querySelector<HTMLElement>(`.mes[mesid="${messageId}"] .mes_text`);
 }
 
+const anchorResizeObservers = new WeakMap<Element, ResizeObserver>();
+const pendingHeightFrames = new Set<HTMLIFrameElement>();
+
+function syncIframeHeight(frame: HTMLIFrameElement): void {
+  if (!frame.isConnected || pendingHeightFrames.has(frame)) return;
+  pendingHeightFrames.add(frame);
+  requestAnimationFrame(() => {
+    pendingHeightFrames.delete(frame);
+    if (!frame.isConnected) return;
+    try {
+      frame.contentWindow?.dispatchEvent(new Event('resize'));
+    } catch {
+      // ignore
+    }
+    requestAnimationFrame(() => {
+      if (!frame.isConnected) return;
+      try {
+        const fdoc = frame.contentDocument;
+        if (!fdoc) return;
+        const body = fdoc.body;
+        const docEl = fdoc.documentElement;
+        if (!body && !docEl) return;
+        const overflowY = body ? fdoc.defaultView?.getComputedStyle(body).overflowY : '';
+        if (overflowY === 'auto' || overflowY === 'scroll') return;
+        const neededHeight = Math.max(docEl?.scrollHeight ?? 0, body?.scrollHeight ?? 0);
+        if (neededHeight > frame.clientHeight + 2) {
+          frame.style.height = `${neededHeight}px`;
+        }
+      } catch {
+        // 跨域或已卸载 iframe 忽略
+      }
+    });
+  });
+}
+
+/**
+ * 若节点位于同源 `<iframe>` 内，通知所属 iframe 重新同步高度（卡片挂载 / 图片加载完成后调用）。
+ */
+export function syncIframeHeightForNode(node: Node | null): void {
+  if (!node) return;
+  const doc = node.ownerDocument;
+  if (!doc || doc === document) return;
+  const frame = doc.defaultView?.frameElement as HTMLIFrameElement | null | undefined;
+  if (frame && frame.tagName === 'IFRAME') syncIframeHeight(frame);
+}
+
+function observeAnchorResizeInIframe(anchor: HTMLElement): void {
+  if (anchor.ownerDocument === document || typeof ResizeObserver !== 'function') return;
+  if (anchorResizeObservers.has(anchor)) return;
+  const ro = new ResizeObserver(() => syncIframeHeightForNode(anchor));
+  ro.observe(anchor);
+  anchorResizeObservers.set(anchor, ro);
+}
+
 function unmountKey(key: string): void {
   const record = slotRegistry.get(key);
   if (!record) return;
+  const host = record.container.host;
+  const ro = anchorResizeObservers.get(host);
+  if (ro) {
+    ro.disconnect();
+    anchorResizeObservers.delete(host);
+  }
   // 显式卸载：锚点容器可能已脱离 DOM（.mes_text 被 ST 整体重写），
   // render(null, container) 对已脱离元素依然安全。
   render(null, record.container);
@@ -116,53 +240,89 @@ function unmountAll(): void {
   }
 }
 
-/**
- * 水合单条消息的全部槽位。
- *
- * 差分策略(替代旧版「先全卸再全挂」):同 key 且锚点元素没变 → render 同类型组件
- * 做 props patch,组件实例与 DOM(尤其 <img>)原样保留;锚点换了(ST 重渲染重建了
- * .mes_text)或新槽位 → 卸载旧记录重挂;本楼不再需要的记录(tag 变少 / swipe 切换 /
- * 楼层离屏 / 消息删除)卸载。
- *
- * 为什么值得:任一槽位出图成功都会触发本楼重水合,旧实现把所有卡片的 <img> 重建,
- * 每张图都重新发起请求(ST 静态服务 max-age=0,每次都要重验证)——楼层里图越多,
- * 一次出图完成的请求风暴越大。patch 路径下 src 不变则 DOM 不动,零请求。
- */
 const observedIframes = new WeakSet<HTMLIFrameElement>();
+const frameObservers = new WeakMap<HTMLIFrameElement, MutationObserver>();
+const hydratingFloors = new Set<number>();
+
+function isPluginSlotNode(node: Node): boolean {
+  if (node.nodeType !== 1) return false;
+  const el = node as Element;
+  return Boolean(
+    el.hasAttribute?.('data-bbm-slot') || el.classList?.contains?.('bbm-fallback-slots'),
+  );
+}
+
+function isOwnIframeMutation(mutations: MutationRecord[]): boolean {
+  return mutations.every(m => {
+    if (m.addedNodes.length === 0 && m.removedNodes.length === 0) return true;
+    for (const n of m.addedNodes) {
+      if (!isPluginSlotNode(n)) return false;
+    }
+    for (const n of m.removedNodes) {
+      if (!isPluginSlotNode(n)) return false;
+    }
+    return true;
+  });
+}
+
+function isFloorFullyMountedInPlace(messageId: number, ctx: STContext): boolean {
+  const msg = ctx.chat[messageId];
+  if (!msg) return true;
+  const tags = parseImageTags(msg.mes);
+  const chatId = ctx.getCurrentChatId();
+  const swipeId = msg.swipe_id ?? 0;
+  const existingKeys = slotRegistry.keysByMessage(chatId, messageId);
+  if (tags.length === 0) return existingKeys.length === 0;
+  if (existingKeys.length !== tags.length) return false;
+
+  for (let seq = 0; seq < tags.length; seq += 1) {
+    const record = slotRegistry.get(slotRegistry.key(chatId, messageId, swipeId, seq));
+    if (!record) return false;
+    const host = record.container.host;
+    if (host.closest?.('.bbm-fallback-slots')) return false;
+    if (checkSlotHealth(host) !== 'ok') return false;
+  }
+  return true;
+}
 
 /**
- * 监听楼层内的同源 `<iframe>`（前端卡 / 美化脚本重渲染时自动触发本楼重新穿透水合）。
+ * 监听楼层内及 `.mes_block` 关联的所有可见同源 `<iframe>`（前端卡 / 美化脚本重渲染时自动触发本楼重新穿透水合）。
  */
 export function observeFloorIframes(mesText: HTMLElement, messageId: number): void {
-  for (const frame of mesText.querySelectorAll('iframe')) {
+  for (const frame of collectFloorIframes(mesText)) {
     if (observedIframes.has(frame)) continue;
     observedIframes.add(frame);
 
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleRehydrate = () => {
+      if (hydratingFloors.has(messageId)) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         debounceTimer = null;
-        if (!frame.isConnected) return;
+        if (!frame.isConnected || hydratingFloors.has(messageId)) return;
         const ctx = getContext();
-        if (ctx) hydrateMessage(messageId, ctx);
+        if (!ctx) return;
+        if (isFloorFullyMountedInPlace(messageId, ctx)) {
+          const mt = findMesText(messageId);
+          if (mt && settings.ui.enableBeautifyPenetration) observeFloorIframes(mt, messageId);
+          return;
+        }
+        hydrateMessage(messageId, ctx);
       }, 60);
     };
 
     const attachInnerObserver = () => {
       try {
-        const body = frame.contentDocument?.body;
-        if (!body || typeof MutationObserver !== 'function') return;
+        frameObservers.get(frame)?.disconnect();
+        const target = frame.contentDocument?.documentElement ?? frame.contentDocument?.body;
+        if (!target || typeof MutationObserver !== 'function') return;
         const obs = new MutationObserver(mutations => {
-          const meaningful = mutations.some(
-            m =>
-              ![...m.addedNodes, ...m.removedNodes].every(
-                n => n instanceof HTMLElement && n.hasAttribute('data-bbm-slot'),
-              ),
-          );
-          if (meaningful) scheduleRehydrate();
+          if (hydratingFloors.has(messageId)) return;
+          if (isOwnIframeMutation(mutations)) return;
+          scheduleRehydrate();
         });
-        obs.observe(body, { childList: true, subtree: true });
+        obs.observe(target, { childList: true, subtree: true });
+        frameObservers.set(frame, obs);
       } catch {
         // 跨域 iframe 忽略
       }
@@ -177,96 +337,104 @@ export function observeFloorIframes(mesText: HTMLElement, messageId: number): vo
 }
 
 export function hydrateMessage(messageId: number, ctx: STContext): void {
-  const chatId = ctx.getCurrentChatId();
-  const message = ctx.chat[messageId];
+  hydratingFloors.add(messageId);
+  try {
+    const chatId = ctx.getCurrentChatId();
+    const message = ctx.chat[messageId];
 
-  /** 本次水合后「应该存在」的槽位:key → {锚点, vnode}。消息没了就留空,下面统一卸载。 */
-  const desired = new Map<string, { anchor: HTMLElement; vnode: VNode }>();
+    /** 本次水合后「应该存在」的槽位:key → {锚点, vnode}。消息没了就留空,下面统一卸载。 */
+    const desired = new Map<string, { anchor: HTMLElement; vnode: VNode }>();
 
-  if (message) {
-    const tags = parseImageTags(message.mes);
-    const swipeId = message.swipe_id ?? 0;
-    // 槽位可能整个消失(用户删掉 tag / swipe 到 tag 更少的一版):那些槽位再没有卡片
-    // 来对账,运行态记录会永久留存,日后同 key 复现时被新卡片误认领。按 tag 数剪掉越界的。
-    pruneGenSlots(chatId ?? '-', messageId, swipeId, tags.length);
+    if (message) {
+      const tags = parseImageTags(message.mes);
+      const swipeId = message.swipe_id ?? 0;
+      // 槽位可能整个消失(用户删掉 tag / swipe 到 tag 更少的一版):那些槽位再没有卡片
+      // 来对账,运行态记录会永久留存,日后同 key 复现时被新卡片误认领。按 tag 数剪掉越界的。
+      pruneGenSlots(chatId ?? '-', messageId, swipeId, tags.length);
 
-    if (tags.length > 0) {
-      const mesText = findMesText(messageId);
-      // 楼层不在 DOM(未渲染/群聊懒渲染):desired 留空,本楼旧记录被卸载,等下次渲染事件
-      if (mesText) {
-        if (settings.ui.enableBeautifyPenetration) {
-          observeFloorIframes(mesText, messageId);
-        }
-        const anchors = resolveFloorAnchors(
-          mesText,
-          messageId,
-          message.mes,
-          settings.ui.enableBeautifyPenetration,
-        );
-        if (anchors.length !== tags.length) {
-          console.warn(
-            `[柏宝·改] 楼层 #${messageId} 锚点 ${anchors.length} 个 ≠ 生图 tag ${tags.length} 个,按少者配对`,
+      if (tags.length > 0) {
+        const mesText = findMesText(messageId);
+        // 楼层不在 DOM(未渲染/群聊懒渲染):desired 留空,本楼旧记录被卸载,等下次渲染事件
+        if (mesText) {
+          if (settings.ui.enableBeautifyPenetration) {
+            observeFloorIframes(mesText, messageId);
+          }
+          const anchors = resolveFloorAnchors(
+            mesText,
+            messageId,
+            message.mes,
+            settings.ui.enableBeautifyPenetration,
           );
-        }
-        const count = Math.min(anchors.length, tags.length);
+          if (anchors.length !== tags.length) {
+            console.warn(
+              `[柏宝·改] 楼层 #${messageId} 锚点 ${anchors.length} 个 ≠ 生图 tag ${tags.length} 个,按少者配对`,
+            );
+          }
+          const count = Math.min(anchors.length, tags.length);
 
-        for (let seq = 0; seq < count; seq++) {
-          const key = slotRegistry.key(chatId, messageId, swipeId, seq);
-          // 从 extra 恢复:当前 tag 原文重算 hash 匹配同槽位历史 → ready(可翻页);
-          // 无匹配但有旧提示词结果 → stale(DESIGN-FLOOR-UI.md §7.1)。
-          const store = readStore(message);
-          const hash = promptHash(tags[seq]);
-          const history = historyEntries(store, swipeId, hash, seq);
-          const entry = history.length ? history[history.length - 1] : null;
-          const staleEntry = entry ? null : latestStaleEntry(store, swipeId, hash, seq);
-          const content = parseImageTagContent(tags[seq]);
-          desired.set(key, {
-            anchor: anchors[seq],
-            vnode: h(Card, {
-              prompt: content.tag,
-              nl: content.nl,
-              negative: content.negative,
-              characters: content.characters,
-              size: content.size,
-              kind: imageTagKind(content),
-              layout: content.layout ?? null,
-              tag: tags[seq],
-              messageId,
-              seq,
-              swipeId,
-              history,
-              staleEntry,
-              // key 的一部分:与 registry.key 的占位口径一致(chatId 缺失时用 '-')
-              chatId: chatId ?? '-',
-            }),
-          });
+          for (let seq = 0; seq < count; seq++) {
+            const key = slotRegistry.key(chatId, messageId, swipeId, seq);
+            // 从 extra 恢复:当前 tag 原文重算 hash 匹配同槽位历史 → ready(可翻页);
+            // 无匹配但有旧提示词结果 → stale(DESIGN-FLOOR-UI.md §7.1)。
+            const store = readStore(message);
+            const hash = promptHash(tags[seq]);
+            const history = historyEntries(store, swipeId, hash, seq);
+            const entry = history.length ? history[history.length - 1] : null;
+            const staleEntry = entry ? null : latestStaleEntry(store, swipeId, hash, seq);
+            const content = parseImageTagContent(tags[seq]);
+            desired.set(key, {
+              anchor: anchors[seq],
+              vnode: h(Card, {
+                prompt: content.tag,
+                nl: content.nl,
+                negative: content.negative,
+                characters: content.characters,
+                size: content.size,
+                kind: imageTagKind(content),
+                layout: content.layout ?? null,
+                tag: tags[seq],
+                messageId,
+                seq,
+                swipeId,
+                history,
+                staleEntry,
+                // key 的一部分:与 registry.key 的占位口径一致(chatId 缺失时用 '-')
+                chatId: chatId ?? '-',
+              }),
+            });
+          }
         }
       }
     }
-  }
 
-  // 卸载本楼不在期望集合内的旧记录(跨 swipeId)
-  for (const key of slotRegistry.keysByMessage(chatId, messageId)) {
-    if (!desired.has(key)) unmountKey(key);
-  }
-
-  // 挂载或差分更新
-  for (const [key, { anchor, vnode }] of desired) {
-    const existing = slotRegistry.get(key);
-    if (existing && existing.container.host === anchor) {
-      // 同锚点:render 同类型组件 → props patch,不重挂 DOM、不重跑 onMounted。
-      // autoGenerate 标记由 onMounted 消费,但它只出现在「刚写入 tag」的锚点上
-      // (写正文必触发 ST 重渲染、锚点必重建),走不到这条分支。
-      existing.vnode = vnode;
-      render(vnode, existing.container);
-    } else {
-      // 卡片渲进锚点的 shadow root,与 ST 样式双向隔离;主题跟随设置(默认 st = 融入宿主配色)
-      if (existing) unmountKey(key);
-      const shadow = ensureShadow(anchor);
-      anchor.setAttribute('data-theme', settings.ui.cardTheme || 'st');
-      render(vnode, shadow);
-      slotRegistry.set(key, { container: shadow, vnode });
+    // 卸载本楼不在期望集合内的旧记录(跨 swipeId)
+    for (const key of slotRegistry.keysByMessage(chatId, messageId)) {
+      if (!desired.has(key)) unmountKey(key);
     }
+
+    // 挂载或差分更新
+    for (const [key, { anchor, vnode }] of desired) {
+      const existing = slotRegistry.get(key);
+      if (existing && existing.container.host === anchor) {
+        // 同锚点:render 同类型组件 → props patch,不重挂 DOM、不重跑 onMounted。
+        ensureShadow(anchor);
+        anchor.setAttribute('data-theme', settings.ui.cardTheme || 'st');
+        observeAnchorResizeInIframe(anchor);
+        existing.vnode = vnode;
+        render(vnode, existing.container);
+      } else {
+        // 卡片渲进锚点的 shadow root,与 ST 样式双向隔离;主题跟随设置(默认 st = 融入宿主配色)
+        if (existing) unmountKey(key);
+        const shadow = ensureShadow(anchor);
+        anchor.setAttribute('data-theme', settings.ui.cardTheme || 'st');
+        render(vnode, shadow);
+        slotRegistry.set(key, { container: shadow, vnode });
+        observeAnchorResizeInIframe(anchor);
+        syncIframeHeightForNode(anchor);
+      }
+    }
+  } finally {
+    hydratingFloors.delete(messageId);
   }
 }
 
@@ -284,24 +452,16 @@ export function hydrateAll(ctx: STContext): void {
 }
 
 const LATE_HYDRATION_DELAY = 100;
+const EXTRA_LATE_HYDRATION_DELAY = 450;
 
 /**
- * 自愈:体检已挂载的槽位,把死掉的重挂;被宿主整段藏掉的只留痕(见 warnHiddenByHost)。
- *
- * 便宜是硬要求——它挂在 rAF 节流的 `#chat` observer 上,流式渲染期间每帧都可能跑。
- * 成本上限是 O(已挂载卡片数)(实测量级 <20),每张只做 `isConnected` 属性读 +
- * 一次 `closest()`;**只有真发现异常**才碰 DOM。绝不在这里调 hydrateVisible:
- * 那会对每条消息跑 parseImageTags + readStore + promptHash,那才是真卡顿。
- *
- * 重挂按楼去重:一楼多卡时,`.mes_text` 被整体换掉意味着该楼所有槽位一起死,
- * 逐个 hydrateMessage 会把同一楼重水合 N 次。
- *
- * 不必担心自激循环:hydrateMessage 写 DOM 会再唤醒一次本回调,但那一轮体检里
- * 这些槽位已是 ok(锚点在文档内),不再产生写操作,循环到此为止。而 observer 只订阅
- * childList、不订阅 attributes,写 data-theme/内联样式压根不会唤醒它。
+ * 自愈:
+ * 1. Pass 1: 体检已挂载槽位,把 detached / hidden-by-beautify 重挂; hidden-by-host 只留痕;
+ * 2. Pass 2: 根据 `#chat` 变更上报的 dirtyFloors 增量纳管新 iframe, 并把 0 槽位或停留在兜底区的楼层升级回正文原位。
  */
-export function healSlots(): void {
+export function healSlots(dirtyFloors?: ReadonlySet<number>): void {
   let floorsToRehydrate: Set<number> | null = null;
+  const hiddenByHostFloors = new Set<number>();
 
   for (const record of slotRegistry.all()) {
     const host = record.container.host;
@@ -309,10 +469,9 @@ export function healSlots(): void {
     if (health === 'ok') continue;
 
     if (health === 'hidden-by-host') {
-      // 锚点还在、shadow root 也在,重挂多少次都没用:是祖先 .mes_text 整段被
-      // ST 的 inline_media 规则藏了(本楼有 extra.media 且 inline_image === false,
-      // 原生出图/打标扩展会写这个组合)。**刻意不去强改它**,只留痕,见 warnHiddenByHost。
       warnHiddenByHost(host);
+      const hiddenFloor = floorIdOf(host);
+      if (hiddenFloor !== null) hiddenByHostFloors.add(hiddenFloor);
       continue;
     }
 
@@ -323,9 +482,26 @@ export function healSlots(): void {
     (floorsToRehydrate ??= new Set()).add(floor);
   }
 
-  if (!floorsToRehydrate) return;
   const ctx = getContext();
   if (!ctx) return;
+
+  if (dirtyFloors && dirtyFloors.size > 0) {
+    for (const floor of dirtyFloors) {
+      if (floorsToRehydrate?.has(floor) || hiddenByHostFloors.has(floor)) continue;
+      const msg = ctx.chat[floor];
+      if (!msg || !hasImageTagTrace(msg.mes)) continue;
+      const mesText = findMesText(floor);
+      if (!mesText) continue;
+      if (settings.ui.enableBeautifyPenetration) {
+        observeFloorIframes(mesText, floor);
+      }
+      if (!isFloorFullyMountedInPlace(floor, ctx)) {
+        (floorsToRehydrate ??= new Set()).add(floor);
+      }
+    }
+  }
+
+  if (!floorsToRehydrate) return;
   for (const floor of floorsToRehydrate) hydrateMessage(floor, ctx);
 }
 
@@ -334,16 +510,6 @@ const hiddenWarned = new Set<number>();
 
 /**
  * 「卡片被宿主整段隐藏」只留痕,不强改。
- *
- * 为什么不顺手钉一条 `display:block !important` 把它拉回来:那条 `display:none`
- * 是 ST 有意为之——`extra.inline_image === false` 的语义正是「这一楼只看图、不看正文」,
- * 由用户或别的扩展设定。强行解除会把人家特意藏起来的正文一并翻出来,对**现在没毛病**
- * 的人是可见的倒退;而且行内样式一旦钉上就撤不掉了(ST 之后按 extra 重算 class,
- * 却管不到我们写的 style),正是那种「改不了又一直在生效」的暗格。
- *
- * 卡片必须落在 tag 的行内位置(多 tag 楼层按位置分别成图),搬不出 .mes_text——
- * 同一条约束当初也否掉了官方 extra.media 方案。故这一类只能如实报告:
- * 日志给出楼层号与原因,便于用户反馈时一句话定位,不假装修好了。
  */
 function warnHiddenByHost(host: Element): void {
   const floor = floorIdOf(host);
@@ -369,11 +535,12 @@ export function bindSlotSelfHealing(): boolean {
 
 /**
  * Other ST listeners may still replace .mes_text after an event. Hydrate at the end of the
- * event loop, then check once more; an unchanged anchor only receives a cheap Vue props patch.
+ * event loop, then check again; an unchanged anchor only receives a cheap Vue props patch.
  */
 function scheduleHydration(
   task: (ctx: STContext) => void,
   lateTask: (ctx: STContext) => void = task,
+  extraLate = false,
 ): void {
   const chatId = getContext()?.getCurrentChatId();
   const run = () => {
@@ -387,6 +554,13 @@ function scheduleHydration(
     if (!current || current.getCurrentChatId() !== chatId) return;
     lateTask(current);
   }, LATE_HYDRATION_DELAY);
+  if (extraLate) {
+    setTimeout(() => {
+      const current = getContext();
+      if (!current || current.getCurrentChatId() !== chatId) return;
+      lateTask(current);
+    }, EXTRA_LATE_HYDRATION_DELAY);
+  }
 }
 
 /**
@@ -403,13 +577,16 @@ export function bindFloorHydration(): boolean {
   const onMessage = (messageId: unknown) => {
     const id = Number(messageId);
     if (!Number.isInteger(id)) return;
-    scheduleHydration(current => hydrateMessage(id, current));
+    scheduleHydration(current => hydrateMessage(id, current), undefined, true);
   };
   const onVisibleReload = () => scheduleHydration(hydrateVisible);
   const onGenerationEnded = (messageCount: unknown) => {
     const id = Number(messageCount) - 1;
-    if (Number.isInteger(id) && id >= 0) scheduleHydration(current => hydrateMessage(id, current));
-    else onVisibleReload();
+    if (Number.isInteger(id) && id >= 0) {
+      scheduleHydration(current => hydrateMessage(id, current), undefined, true);
+    } else {
+      onVisibleReload();
+    }
   };
   const onFullReload = () => {
     clearAutoGenerateFlags();

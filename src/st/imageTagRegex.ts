@@ -15,10 +15,15 @@ import type { ComfyKind } from '@/state/settings';
  * promptOnly&&isPrompt 不会同时命中），可安全共存。
  */
 
-export const IMAGE_TAG_FIND_REGEX_LITERAL = '/<bbm_image>[\\s\\S]+?<\\/bbm_image>/gi';
+export const IMAGE_TAG_FIND_REGEX_LITERAL =
+  '/(?:##bbm_image[\\s\\S]+?bbm_image##|<bbm_image>[\\s\\S]+?<\\/bbm_image>)/gi';
 
-/** 与托管脚本同源的运行时正则：解析 message.mes 原文里的 tag（水合配对用）。 */
-export const IMAGE_TAG_FIND_REGEX = /<bbm_image>[\s\S]+?<\/bbm_image>/gi;
+/** 与托管脚本同源的运行时正则：解析 message.mes 原文里的 tag（同时兼容新版 ##bbm_image 与存量 <bbm_image>）。 */
+export const IMAGE_TAG_FIND_REGEX =
+  /(?:##bbm_image[\s\S]+?bbm_image##|<bbm_image>[\s\S]+?<\/bbm_image>)/gi;
+
+/** 显示侧纯文本哨兵占位：穿透正文美化/iframe/.textContent 提取，由水合/穿透阶段原位物化为槽位 DOM。 */
+export const IMAGE_TAG_SLOT_SENTINEL = '@@BBMSLOT@@';
 
 /** 显示侧锚点 DOM 选择器（锚点只用 data 属性，class 会被 DOMPurify 加 custom- 前缀）。 */
 export const BBI_SLOT_SELECTOR = 'div[data-bbm-slot]';
@@ -67,13 +72,13 @@ export interface ManagedRegexScript extends Record<string, unknown> {
   runOnEdit: boolean;
 }
 
-/** 显示侧：生图 tag → 空锚点（水合时 Vue 卡片渲染进锚点）。 */
+/** 显示侧：生图 tag → 纯文本哨兵（抗正文美化清洗，水合时原位物化为锚点再渲染 Vue 卡片）。 */
 export function imageTagSlotScript(): ManagedRegexScript {
   return {
     id: IMAGE_TAG_SLOT_REGEX_ID,
     scriptName: '柏宝·改 · 生图标签占位',
     findRegex: IMAGE_TAG_FIND_REGEX_LITERAL,
-    replaceString: '<div data-bbm-slot=""></div>',
+    replaceString: IMAGE_TAG_SLOT_SENTINEL,
     trimStrings: [],
     placement: [...DISPLAY_AND_PROMPT_PLACEMENTS],
     disabled: false,
@@ -119,7 +124,7 @@ export function parseImageTags(mes: string): string[] {
  * 于是以为有 tag 而静默放弃——用户看到的就是「按钮点了永远没反应」。
  */
 export function hasImageTagTrace(mes: string): boolean {
-  return /<\/?bbm_image\b/i.test(mes ?? '');
+  return /<\/?bbm_image\b|##bbm_image\b|bbm_image##/i.test(mes ?? '');
 }
 
 /**
@@ -137,23 +142,32 @@ export function hasImageTagTrace(mes: string): boolean {
 export function stripImageTags(mes: string): string {
   const source = String(mes ?? '');
   // 就地新建:模块级带 /g 的正则实例 lastIndex 有状态,exec 循环不能共用(同 replaceImageTagAt)
-  const tokens = /<\/?bbm_image\b[^>]*>/gi;
+  // ##bbm_image 与 <bbm_image> 各自独立配对,绝不串栈
+  const tokens = /<\/?bbm_image\b[^>]*>|##bbm_image\b|bbm_image##/gi;
   const ranges: Array<{ start: number; end: number }> = [];
-  const openStack: Array<{ start: number; end: number }> = [];
+  const xmlOpenStack: Array<{ start: number; end: number }> = [];
+  const hashOpenStack: Array<{ start: number; end: number }> = [];
   for (let match = tokens.exec(source); match; match = tokens.exec(source)) {
     const start = match.index;
     const end = start + match[0].length;
-    if (match[0][1] === '/') {
-      const open = openStack.pop();
+    const rawToken = match[0].toLowerCase();
+    if (rawToken === '##bbm_image') {
+      hashOpenStack.push({ start, end });
+    } else if (rawToken === 'bbm_image##') {
+      const open = hashOpenStack.pop();
+      ranges.push({ start: open ? open.start : start, end });
+    } else if (rawToken.startsWith('</')) {
+      const open = xmlOpenStack.pop();
       ranges.push({ start: open ? open.start : start, end });
     } else {
-      openStack.push({ start, end });
+      xmlOpenStack.push({ start, end });
     }
   }
-  for (const open of openStack) ranges.push(open);
+  for (const open of xmlOpenStack) ranges.push(open);
+  for (const open of hashOpenStack) ranges.push(open);
   if (!ranges.length) return source;
 
-  ranges.sort((left, right) => left.start - right.start);
+  ranges.sort((left, right) => left.start - right.start || right.end - left.end);
   let out = '';
   let cursor = 0;
   for (const range of ranges) {
@@ -166,14 +180,13 @@ export function stripImageTags(mes: string): string {
 }
 
 /**
- * tag / nl / negative 内容里不允许出现的子标签字面量（会污染 bbi_image 内部解析）。
+ * tag / nl / negative 内容里不允许出现的子标签字面量（会污染 bbm_image 内部解析）。
  *
  * 唯一口径：AI 侧(autoTag/protocol.ts 的 sanitizeContent)与手输侧(提示词编辑弹窗)
- * 共用这一份。**绝不再抄第二份** —— 查找正则 `<bbi_image>…</bbi_image>` 是非贪婪的，
- * 内容里混进一个 `</bbi_image>` 就会让 tag 提前截断、后半截漏进 DOM 与提示词，
- * 正好破掉「tag 永不进 DOM、永不进提示词」这条不变式。
+ * 共用这一份。
  */
-export const FORBIDDEN_SUBTAG = /<\/?(?:bbm_image|bbi_image|tag|nl|negative|characters|size|type|layout)\b/i;
+export const FORBIDDEN_SUBTAG =
+  /<\/?(?:bbm_image|bbi_image|tag|nl|negative|characters|size|type|layout)\b|##bbm_image\b|bbm_image##/i;
 
 /** 文本里是否含 bbi_image 子标签字面量（手输校验用；口径同 AI 侧）。 */
 export function containsTagMarkup(text: string): boolean {
@@ -207,18 +220,22 @@ export function imageTagKind(content: Pick<ImageTagContent, 'kind'>): ComfyKind 
   return content.kind === 'comic' ? 'comic' : 'illustration';
 }
 
-/**
- * 解析 tag 原文（含 <bbi_image> 壳）的内部内容。一条容忍式规则覆盖三种形态：
- * - <bbi_image>xxxx</bbi_image>                    裸文本 = tag（存量兼容）
- * - <bbi_image>xxxx<nl>yyyy</nl></bbi_image>       裸文本 = tag，<nl> = nl
- * - <bbi_image><tag>x</tag><negative>y</negative></bbi_image> 显式子标签（手写容忍）
- * 裸文本与显式 <tag> 同时存在时按「裸文本在前」以 ", " 合并进 tag 部分，不丢内容。
- * <size>/<nl>/<negative> 必须先剥掉，不能漏进正向提示词。
- */
-export function parseImageTagContent(raw: string): ImageTagContent {
-  // 内容统一折叠成单行:手写 tag 可能跨行,而提示词里换行没有意义
-  const oneLine = (text: string) => text.trim().replace(/[\r\n]+/g, ' ');
-  const inner = raw.replace(/^<bbm_image[^>]*>/i, '').replace(/<\/bbm_image>$/i, '');
+function normalizeCharactersList(
+  raw: unknown,
+  oneLine: (text: string) => string,
+): ImageCharacterPrompt[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 32).flatMap(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const rawItem = item as Record<string, unknown>;
+    const name = oneLine(typeof rawItem.name === 'string' ? rawItem.name : '');
+    const tag = oneLine(typeof rawItem.tag === 'string' ? rawItem.tag : '');
+    const nl = oneLine(typeof rawItem.nl === 'string' ? rawItem.nl : '');
+    return name && tag ? [{ name, tag, nl }] : [];
+  });
+}
+
+function parseLegacyInner(inner: string, oneLine: (text: string) => string): ImageTagContent {
   const sizeMatch = inner.match(/<size>([\s\S]*?)<\/size>/i);
   const size = normalizeOrientation(sizeMatch ? oneLine(sizeMatch[1]) : '');
   const typeMatch = inner.match(/<type>([\s\S]*?)<\/type>/i);
@@ -241,17 +258,7 @@ export function parseImageTagContent(raw: string): ImageTagContent {
   let characters: ImageCharacterPrompt[] = [];
   if (charactersMatch) {
     try {
-      const parsed = JSON.parse(charactersMatch[1]);
-      if (Array.isArray(parsed)) {
-        characters = parsed.slice(0, 32).flatMap(item => {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
-          const rawItem = item as Record<string, unknown>;
-          const name = oneLine(typeof rawItem.name === 'string' ? rawItem.name : '');
-          const tag = oneLine(typeof rawItem.tag === 'string' ? rawItem.tag : '');
-          const nl = oneLine(typeof rawItem.nl === 'string' ? rawItem.nl : '');
-          return name && tag ? [{ name, tag, nl }] : [];
-        });
-      }
+      characters = normalizeCharactersList(JSON.parse(charactersMatch[1]), oneLine);
     } catch {
       // Invalid character JSON must not break the otherwise valid Base prompt.
     }
@@ -272,29 +279,68 @@ export function parseImageTagContent(raw: string): ImageTagContent {
 }
 
 /**
- * 序列化成 tag 原文（含 <bbi_image> 壳）—— parseImageTagContent 的反向操作。
- *
- * **格式的读与写只有这一份**：注入(autoTag/protocol.ts 的 injectImageTags)与手动编辑
- * (floor/promptEditor.ts)共用，两处漂移会让「解析得到的字段」与「落进正文的原文」对不上，
- * 而 promptHash 吃的正是原文 —— 漂移直接表现为「什么都没改却全变 stale」。
- *
- * 标准形态：tag 部分保持裸文本（与存量格式一致），nl/negative/characters 空则整段不写。
- * size **恒写出**：生成是延后的(点卡片才出图)，方向必须随 tag 持久化在正文里。
- *
- * 漫画:`<type>comic</type><layout>{JSON}</layout><size>…</size>`。插画**不写** <type>——
- * 写了就会让「打开弹窗什么都不改保存」的存量 tag 换 promptHash 桶。
+ * 解析 tag 原文，同时支持新版无尖括号格式 `##bbm_image ... bbm_image##` 与存量 `<bbm_image>...</bbm_image>`。
+ */
+export function parseImageTagContent(raw: string): ImageTagContent {
+  // 内容统一折叠成单行:手写 tag 可能跨行,而提示词里换行没有意义
+  const oneLine = (text: string) => text.trim().replace(/[\r\n]+/g, ' ');
+  const trimmed = raw.trim();
+  if (/^##bbm_image\b/i.test(trimmed)) {
+    const inner = trimmed
+      .replace(/^##bbm_image\b\s*/i, '')
+      .replace(/\s*bbm_image##$/i, '')
+      .trim();
+    if (inner.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(inner) as Record<string, unknown>;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const size = normalizeOrientation(
+            typeof parsed.size === 'string' ? oneLine(parsed.size) : '',
+          );
+          if (typeof parsed.type === 'string' && oneLine(parsed.type).toLowerCase() === 'comic') {
+            let layout: ComicLayout | null = null;
+            try {
+              layout = parsed.layout ? validateComicLayout(parsed.layout) : null;
+            } catch {
+              layout = null;
+            }
+            return { tag: '', nl: '', negative: '', characters: [], size, kind: 'comic', layout };
+          }
+          const tag = typeof parsed.tag === 'string' ? oneLine(parsed.tag) : '';
+          const nl = typeof parsed.nl === 'string' ? oneLine(parsed.nl) : '';
+          const negative = typeof parsed.negative === 'string' ? oneLine(parsed.negative) : '';
+          const characters = normalizeCharactersList(parsed.characters, oneLine);
+          return { tag, nl, negative, characters, size };
+        }
+      } catch {
+        // 非法 JSON 回退至容忍式裸文本解析
+      }
+    }
+    return parseLegacyInner(inner, oneLine);
+  }
+
+  const inner = raw.replace(/^<bbm_image[^>]*>/i, '').replace(/<\/bbm_image>$/i, '');
+  return parseLegacyInner(inner, oneLine);
+}
+
+/**
+ * 序列化成无尖括号成对标记 `##bbm_image {...} bbm_image##`（抗正文美化/HTML清洗/前端卡绕过正则）。
  */
 export function serializeImageTag(content: ImageTagContent): string {
   if (imageTagKind(content) === 'comic') {
-    const layout = content.layout ? serializeComicLayout(content.layout) : '';
-    return `<bbm_image><type>comic</type><layout>${layout}</layout><size>${content.size}</size></bbm_image>`;
+    const payload: Record<string, unknown> = { type: 'comic' };
+    if (content.layout) {
+      payload.layout = JSON.parse(serializeComicLayout(content.layout));
+    }
+    payload.size = content.size;
+    return `##bbm_image ${JSON.stringify(payload)} bbm_image##`;
   }
-  const nl = content.nl ? `<nl>${content.nl}</nl>` : '';
-  const negative = content.negative ? `<negative>${content.negative}</negative>` : '';
-  const characters = content.characters.length
-    ? `<characters>${JSON.stringify(content.characters)}</characters>`
-    : '';
-  return `<bbm_image>${content.tag}${nl}${negative}${characters}<size>${content.size}</size></bbm_image>`;
+  const payload: Record<string, unknown> = { tag: content.tag };
+  if (content.nl) payload.nl = content.nl;
+  if (content.negative) payload.negative = content.negative;
+  if (content.characters.length) payload.characters = content.characters;
+  payload.size = content.size;
+  return `##bbm_image ${JSON.stringify(payload)} bbm_image##`;
 }
 
 /**
@@ -345,7 +391,7 @@ export function replaceImageTagAt(mes: string, seq: number, nextTag: string): st
   if (!Number.isInteger(seq) || seq < 0) return null;
   let index = 0;
   let replaced = false;
-  const output = mes.replace(/<bbm_image>[\s\S]+?<\/bbm_image>/gi, match => {
+  const output = mes.replace(new RegExp(IMAGE_TAG_FIND_REGEX.source, 'gi'), match => {
     if (index++ !== seq) return match;
     replaced = true;
     return nextTag;
@@ -374,8 +420,19 @@ export function ensureImageTagRegexRegistered(): boolean {
   for (const make of MANAGED_SCRIPTS) {
     const script = make();
     const index = list.findIndex(item => item?.id === script.id);
-    if (index >= 0) list[index] = { ...list[index], ...script };
-    else list.push(script);
+    if (script.id === IMAGE_TAG_SLOT_REGEX_ID) {
+      // 显示侧占位规则置顶：先于所有全局/局部正文美化正则将 <bbm_image> 替换为纯文本哨兵
+      if (index >= 0) {
+        const [existing] = list.splice(index, 1);
+        list.unshift({ ...existing, ...script });
+      } else {
+        list.unshift(script);
+      }
+    } else if (index >= 0) {
+      list[index] = { ...list[index], ...script };
+    } else {
+      list.push(script);
+    }
   }
   context.saveSettingsDebounced?.();
   return true;

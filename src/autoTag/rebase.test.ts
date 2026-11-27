@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { prepareTargetText } from '@/autoTag/clean';
 import { injectImageTags, type ImageInsertion } from '@/autoTag/protocol';
 import { rebaseImagePositions } from '@/autoTag/rebase';
+import { parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
 
 function image(sourceLine: number, tag: string): ImageInsertion {
   return {
@@ -24,7 +25,9 @@ function plan(text: string, stripTags: string[] = []) {
 /** 落点断言看的是「tag 贴在哪一句之后」,比行号更接近用户能观察到的结果。 */
 function lineAfterTag(text: string, tag: string): string {
   const lines = text.split('\n');
-  const index = lines.findIndex(line => line.includes(`<bbm_image>${tag}`));
+  const index = lines.findIndex(line =>
+    parseImageTags(line).some(raw => parseImageTagContent(raw).tag === tag),
+  );
   return index > 0 ? lines[index - 1] : '';
 }
 

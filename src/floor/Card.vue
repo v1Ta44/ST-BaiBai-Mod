@@ -24,7 +24,7 @@ import {
   setQueueAhead,
   slotKey,
 } from '@/floor/genState';
-import { hydrateMessage } from '@/floor/hydrate';
+import { hydrateMessage, syncIframeHeightForNode } from '@/floor/hydrate';
 import { openLightbox } from '@/floor/lightbox';
 import { confirmImageMissing, isImageMissing } from '@/floor/missingImages';
 import { openPromptEditor } from '@/floor/promptEditor';
@@ -149,11 +149,13 @@ function onImageClick(): void {
 }
 
 const rootEl = ref<HTMLElement | null>(null);
+let boundOutsideDocs: Document[] = [];
 
 /**
  * 点卡片外任意处收起控件。卡片挂在锚点的 open shadow root 里,composedPath 能穿进去,
  * 直接比 path 而不用 contains(contains 不跨 shadow 边界)。
  * 捕获阶段监听:ST 有些按钮会 stopPropagation,冒泡阶段收不到。
+ * 若卡片在同源 iframe 内,同时监听顶层 document 与宿主 ownerDocument。
  */
 function onOutsidePointerDown(event: PointerEvent): void {
   if (rootEl.value && event.composedPath().includes(rootEl.value)) return;
@@ -161,12 +163,26 @@ function onOutsidePointerDown(event: PointerEvent): void {
   menuOpen.value = false;
 }
 
+function detachOutsideListeners(): void {
+  for (const doc of boundOutsideDocs) {
+    doc.removeEventListener('pointerdown', onOutsidePointerDown, true);
+  }
+  boundOutsideDocs = [];
+}
+
 // 只在浮现期间挂监听:一屏几十张卡片,不该每张都常驻一个全局 pointerdown
 watch(uiRevealed, revealed => {
-  if (revealed) document.addEventListener('pointerdown', onOutsidePointerDown, true);
-  else document.removeEventListener('pointerdown', onOutsidePointerDown, true);
+  detachOutsideListeners();
+  if (!revealed) return;
+  const docs = new Set<Document>([document]);
+  const ownerDoc = rootEl.value?.ownerDocument;
+  if (ownerDoc) docs.add(ownerDoc);
+  for (const doc of docs) {
+    doc.addEventListener('pointerdown', onOutsidePointerDown, true);
+  }
+  boundOutsideDocs = [...docs];
 });
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePointerDown, true));
+onBeforeUnmount(detachOutsideListeners);
 
 /** 运行态记录(可能为 undefined = 无在途任务)。 */
 const record = computed(() => getGenRecord(key.value));
@@ -237,8 +253,22 @@ const promptText = computed(() =>
  * 当前展示的结果。**刻意不看运行态**:生成失败/重绘中都该继续显示上一张图,
  * 否则「有图 → 点重绘 → 失败」会让图凭空消失(只剩一行报错),看着像把图弄丢了。
  */
+function resolveImageSrc(path: string): string {
+  if (!path) return '';
+  if (/^(?:https?:|data:|blob:)/i.test(path)) return path;
+  try {
+    const normalized = path.startsWith('/') ? path : `/${path}`;
+    if (typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null') {
+      return new URL(normalized, window.location.origin).href;
+    }
+  } catch {
+    // 解析失败回退原路径
+  }
+  return path;
+}
+
 const shownEntry = computed(() => (liveHistory.value.length ? current.value : liveStale.value));
-const imageSrc = computed(() => shownEntry.value?.path ?? '');
+const imageSrc = computed(() => resolveImageSrc(shownEntry.value?.path ?? ''));
 /**
  * 灯箱展示用:提示词 + 只读元信息(画师串/vibe/采样参数)。
  * 与卡片内可编辑的 `promptText` 分开 —— 元信息只读,绝不能混进可写回的 tag 文本。
@@ -255,9 +285,13 @@ const lightboxPrompt = computed(() => {
  * 确认失败时什么都不做:破图占位留着,下次重挂 <img> 会自然重试。
  */
 async function onImageError(): Promise<void> {
-  const path = imageSrc.value;
+  const path = shownEntry.value?.path;
   if (!path) return;
   await confirmImageMissing(path);
+}
+
+function onImageLoad(): void {
+  syncIframeHeightForNode(rootEl.value);
 }
 const downloadFileName = (entry: BbiImageEntry): string => {
   const context = getContext();
@@ -583,6 +617,7 @@ onMounted(() => {
         :src="imageSrc"
         alt="生图结果"
         @click="onImageClick"
+        @load="onImageLoad"
         @error="onImageError"
       />
 

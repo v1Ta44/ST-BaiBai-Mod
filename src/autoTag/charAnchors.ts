@@ -86,7 +86,7 @@ const CONVERT_SPEC = `你是外貌 tag 转换器。把给出的角色中文外�
 function sanitizeTagValue(value: unknown): string {
   const text = typeof value === 'string' ? value.trim().replace(/[\r\n]+/g, ' ') : '';
   if (!text) return '';
-  if (/<\/?(?:bbm_image|bbi_image|tag|nl|size)\b/i.test(text)) return '';
+  if (/<\/?(?:bbm_image|bbi_image|tag|nl|size)\b|##bbm_image\b|bbm_image##/i.test(text)) return '';
   return text;
 }
 

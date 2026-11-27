@@ -7,6 +7,7 @@ import {
   hasImageTagTrace,
   IMAGE_TAG_HIDE_REGEX_ID,
   IMAGE_TAG_SLOT_REGEX_ID,
+  IMAGE_TAG_SLOT_SENTINEL,
   imageTagHideScript,
   imageTagKind,
   imageTagSlotScript,
@@ -17,7 +18,7 @@ import {
   stripImageTags,
 } from '@/st/imageTagRegex';
 
-const SLOT_DIV = '<div data-bbm-slot=""></div>';
+const SLOT_SENTINEL = IMAGE_TAG_SLOT_SENTINEL;
 
 function regexFromLiteral(literal: string): RegExp {
   const match = literal.match(/^\/(.*)\/([a-z]*)$/i);
@@ -28,7 +29,7 @@ function regexFromLiteral(literal: string): RegExp {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('display-side slot script (markdownOnly)', () => {
-  it('replaces each complete tag block with an empty slot anchor', () => {
+  it('replaces both legacy XML tags and new ##bbm_image tags with sentinel', () => {
     const script = imageTagSlotScript();
     expect(script.markdownOnly).toBe(true);
     expect(script.promptOnly).toBe(false);
@@ -38,7 +39,13 @@ describe('display-side slot script (markdownOnly)', () => {
     const regex = regexFromLiteral(script.findRegex);
     expect(
       '正文前\n<bbm_image>1girl,\nmoonlight</bbm_image>\n正文后'.replace(regex, script.replaceString),
-    ).toBe(`正文前\n${SLOT_DIV}\n正文后`);
+    ).toBe(`正文前\n${SLOT_SENTINEL}\n正文后`);
+    expect(
+      '正文前\n##bbm_image {"tag":"1girl, moonlight","size":"portrait"} bbm_image##\n正文后'.replace(
+        regex,
+        script.replaceString,
+      ),
+    ).toBe(`正文前\n${SLOT_SENTINEL}\n正文后`);
   });
 
   it('handles multiple tags without swallowing text between them', () => {
@@ -49,7 +56,19 @@ describe('display-side slot script (markdownOnly)', () => {
         regex,
         script.replaceString,
       ),
-    ).toBe(`${SLOT_DIV}中间正文${SLOT_DIV}`);
+    ).toBe(`${SLOT_SENTINEL}中间正文${SLOT_SENTINEL}`);
+  });
+
+  it('produces a plain-text sentinel that survives quote highlight, HTML stripping, and URL decoding', () => {
+    const script = imageTagSlotScript();
+    const regex = regexFromLiteral(script.findRegex);
+    const quoteHighlight = /"([^"]*)"/g;
+    const htmlStrip = /<[^>]+>/g;
+    const text = '她说："你好"。<bbm_image>1girl</bbm_image>'
+      .replace(regex, script.replaceString)
+      .replace(quoteHighlight, '<q>"$1"</q>')
+      .replace(htmlStrip, '');
+    expect(decodeURIComponent(text)).toBe(`她说："你好"。${SLOT_SENTINEL}`);
   });
 });
 
@@ -106,10 +125,14 @@ describe('placement covers narrator floors (regression lock)', () => {
 });
 
 describe('parseImageTags', () => {
-  it('returns tags in document order, preserving raw text', () => {
-    expect(parseImageTags('a<bbm_image>one</bbm_image>b<bbm_image>two,\nlines</bbm_image>c')).toEqual([
+  it('returns tags in document order for both formats, preserving raw text', () => {
+    expect(
+      parseImageTags(
+        'a<bbm_image>one</bbm_image>b##bbm_image {"tag":"two","size":"portrait"} bbm_image##c',
+      ),
+    ).toEqual([
       '<bbm_image>one</bbm_image>',
-      '<bbm_image>two,\nlines</bbm_image>',
+      '##bbm_image {"tag":"two","size":"portrait"} bbm_image##',
     ]);
   });
 
@@ -131,6 +154,12 @@ describe('hasImageTagTrace', () => {
 
   it('sees a lone opening tag and is case-insensitive', () => {
     expect(hasImageTagTrace('<BBM_Image>')).toBe(true);
+  });
+
+  it('sees ##bbm_image opening and closing traces', () => {
+    expect(hasImageTagTrace('场景\n##bbm_image {"tag":"1girl","size":"portrait"} bbm_image##')).toBe(true);
+    expect(hasImageTagTrace('半截 ##bbm_image')).toBe(true);
+    expect(hasImageTagTrace('半截 bbm_image##')).toBe(true);
   });
 
   it('is false for tag-free text and for a lookalike prefix', () => {
@@ -176,6 +205,18 @@ describe('stripImageTags', () => {
 
   it('deletes the whole outer span when opening tags nest', () => {
     expect(stripImageTags('前\n<bbm_image>a<bbm_image>b</bbm_image></bbm_image>\n后')).toBe('前\n后');
+  });
+
+  it('strips ##bbm_image blocks and orphan ##bbm_image / bbm_image## tokens without cross-pairing XML', () => {
+    expect(
+      stripImageTags(
+        '第一行\n##bbm_image {"tag":"1girl","size":"portrait"} bbm_image##\n第二行\n<bbm_image>legacy</bbm_image>\n第三行',
+      ),
+    ).toBe('第一行\n第二行\n第三行');
+    expect(
+      stripImageTags('第一行\n##bbm_image\n第二行\n##bbm_image {"tag":"1girl"} bbm_image##\n第三行'),
+    ).toBe('第一行\n第二行\n第三行');
+    expect(stripImageTags('残骸 bbm_image## 在此')).toBe('残骸  在此');
   });
 });
 
@@ -270,10 +311,31 @@ describe('parseImageTagContent', () => {
     expect(parseImageTagContent('<bbm_image>1girl</bbm_image>').size).toBe('portrait');
     expect(parseImageTagContent('<bbm_image>1girl<size>乱写</size></bbm_image>').size).toBe('portrait');
   });
+
+  it('parses new ##bbm_image JSON tags and bare hand-written ##bbm_image tags', () => {
+    expect(
+      parseImageTagContent(
+        '##bbm_image {"tag":"2girls, classroom","nl":"Two girls.","negative":"blurry","characters":[{"name":"A","tag":"girl","nl":"left"}],"size":"landscape"} bbm_image##',
+      ),
+    ).toEqual({
+      tag: '2girls, classroom',
+      nl: 'Two girls.',
+      negative: 'blurry',
+      characters: [{ name: 'A', tag: 'girl', nl: 'left' }],
+      size: 'landscape',
+    });
+    expect(parseImageTagContent('##bbm_image 1girl, moonlight bbm_image##')).toEqual({
+      tag: '1girl, moonlight',
+      nl: '',
+      negative: '',
+      characters: [],
+      size: 'portrait',
+    });
+  });
 });
 
 describe('serializeImageTag', () => {
-  it('writes every sub-tag when all fields are present', () => {
+  it('writes canonical ##bbm_image JSON format when all fields are present', () => {
     expect(
       serializeImageTag({
         tag: '2girls, classroom',
@@ -283,31 +345,36 @@ describe('serializeImageTag', () => {
         size: 'landscape',
       }),
     ).toBe(
-      '<bbm_image>2girls, classroom<nl>Two girls talking.</nl><negative>extra people</negative>' +
-        '<characters>[{"name":"A","tag":"girl, black hair","nl":"left"}]</characters>' +
-        '<size>landscape</size></bbm_image>',
+      '##bbm_image {"tag":"2girls, classroom","nl":"Two girls talking.","negative":"extra people",' +
+        '"characters":[{"name":"A","tag":"girl, black hair","nl":"left"}],"size":"landscape"} bbm_image##',
     );
   });
 
-  it('omits empty nl/negative/characters instead of writing empty sub-tags', () => {
-    expect(
-      serializeImageTag({ tag: '1girl', nl: '', negative: '', characters: [], size: 'portrait' }),
-    ).toBe('<bbm_image>1girl<size>portrait</size></bbm_image>');
+  it('omits empty nl/negative/characters and contains zero angle brackets', () => {
+    const out = serializeImageTag({
+      tag: '1girl',
+      nl: '',
+      negative: '',
+      characters: [],
+      size: 'portrait',
+    });
+    expect(out).toBe('##bbm_image {"tag":"1girl","size":"portrait"} bbm_image##');
+    expect(out).not.toContain('<');
+    expect(out).not.toContain('>');
   });
 
-  it('always writes <size> — generation is deferred, so orientation must persist in the text', () => {
+  it('always writes size — generation is deferred, so orientation must persist in the text', () => {
     expect(
       serializeImageTag({ tag: '1girl', nl: '', negative: '', characters: [], size: 'landscape' }),
-    ).toContain('<size>landscape</size>');
+    ).toContain('"size":"landscape"');
   });
 
-  it('round-trips through parseImageTagContent byte-for-byte in canonical form', () => {
-    // 这条锁死「打开弹窗、什么都不改、保存」不会换 promptHash 桶 —— 一换,老图全变 stale。
+  it('round-trips canonical ##bbm_image tags byte-for-byte through parseImageTagContent', () => {
     const canonical = [
-      '<bbm_image>1girl<size>portrait</size></bbm_image>',
-      '<bbm_image>2girls<nl>Two girls.</nl><size>landscape</size></bbm_image>',
-      '<bbm_image>1girl<negative>extra people</negative><size>portrait</size></bbm_image>',
-      '<bbm_image>2girls<characters>[{"name":"A","tag":"girl","nl":""}]</characters><size>landscape</size></bbm_image>',
+      '##bbm_image {"tag":"1girl","size":"portrait"} bbm_image##',
+      '##bbm_image {"tag":"2girls","nl":"Two girls.","size":"landscape"} bbm_image##',
+      '##bbm_image {"tag":"1girl","negative":"extra people","size":"portrait"} bbm_image##',
+      '##bbm_image {"tag":"2girls","characters":[{"name":"A","tag":"girl","nl":""}],"size":"landscape"} bbm_image##',
     ];
     for (const raw of canonical) {
       expect(serializeImageTag(parseImageTagContent(raw))).toBe(raw);
@@ -370,14 +437,15 @@ describe('comic tags', () => {
   };
   const content = { tag: '', nl: '', negative: '', characters: [], size: 'portrait' as const, kind: 'comic' as const, layout };
 
-  it('serializes as <type>comic</type><layout>…</layout><size>…</size> and parses back', () => {
+  it('serializes comic layout as ##bbm_image JSON without angle brackets and parses back', () => {
     const raw = serializeImageTag(content);
     expect(raw).toBe(
-      '<bbm_image><type>comic</type><layout>{"summary":"full color manga page","items":[' +
+      '##bbm_image {"type":"comic","layout":{"summary":"full color manga page","items":[' +
         '{"label":"character","name":"小雪","caption":"smiles","bbox":[0,0,500,1000]},' +
         '{"label":"text","caption":"speech bubble","text":"你回来啦?","bbox":[40,600,200,960]}' +
-        ']}</layout><size>portrait</size></bbm_image>',
+        ']},"size":"portrait"} bbm_image##',
     );
+    expect(raw).not.toContain('<');
     expect(parseImageTagContent(raw)).toEqual(content);
     expect(serializeImageTag(parseImageTagContent(raw))).toBe(raw);
   });
@@ -443,18 +511,28 @@ describe('replaceImageTagAt', () => {
     expect(replaceImageTagAt(text, 2, next)).toBe(replaceImageTagAt(text, 2, next));
   });
 
-  it('handles multi-line and inline tags on the same line', () => {
+  it('handles multi-line and inline tags on the same line, including mixed formats', () => {
     expect(
       replaceImageTagAt('前 <bbm_image>a,\nb</bbm_image> 中 <bbm_image>c</bbm_image> 后', 1, next),
     ).toBe(`前 <bbm_image>a,\nb</bbm_image> 中 ${next} 后`);
+    const hashNext = '##bbm_image {"tag":"edited","size":"portrait"} bbm_image##';
+    expect(
+      replaceImageTagAt(
+        '前 ##bbm_image {"tag":"a","size":"portrait"} bbm_image## 中 <bbm_image>b</bbm_image> 后',
+        1,
+        hashNext,
+      ),
+    ).toBe(`前 ##bbm_image {"tag":"a","size":"portrait"} bbm_image## 中 ${hashNext} 后`);
   });
 });
 
 describe('containsTagMarkup', () => {
-  it('catches sub-tag literals that would truncate the tag block', () => {
-    // 查找正则是非贪婪的:内容里混进 </bbm_image> 会让 tag 提前截断,后半截漏进 DOM 与提示词
+  it('catches sub-tag literals and ##bbm_image delimiters that would truncate the tag block', () => {
+    // 查找正则是非贪婪的:内容里混进 </bbm_image> 或 bbm_image## 会让 tag 提前截断,后半截漏进 DOM 与提示词
     expect(containsTagMarkup('1girl</bbm_image>后半截')).toBe(true);
     expect(containsTagMarkup('1girl<bbm_image>')).toBe(true);
+    expect(containsTagMarkup('1girl bbm_image## 后半截')).toBe(true);
+    expect(containsTagMarkup('1girl ##bbm_image')).toBe(true);
     expect(containsTagMarkup('a<nl>b')).toBe(true);
     expect(containsTagMarkup('a</nl>')).toBe(true);
     expect(containsTagMarkup('a<negative>b')).toBe(true);
@@ -470,10 +548,17 @@ describe('containsTagMarkup', () => {
   });
 });
 
-describe('managed bbi image-tag regex registration', () => {  it('registers both scripts once by fixed id and updates old managed rules', () => {
+describe('managed bbi image-tag regex registration', () => {
+  it('pins the slot script at index 0 ahead of user regexes, updates old managed rules idempotently', () => {
     const saveSettingsDebounced = vi.fn();
     const unrelated = { id: 'user-rule', scriptName: '用户规则' };
-    const legacy = {
+    const legacySlot = {
+      id: IMAGE_TAG_SLOT_REGEX_ID,
+      scriptName: 'old-slot',
+      replaceString: '<div data-bbm-slot=""></div>',
+      customSlotField: 'keep-me',
+    };
+    const legacyHide = {
       id: IMAGE_TAG_HIDE_REGEX_ID,
       scriptName: '柏宝·改 · 隐藏生图标签',
       findRegex: '/old/g',
@@ -482,7 +567,7 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
       placement: [0, 1, 2],
       customField: 'preserved',
     };
-    const extensionSettings: Record<string, unknown> = { regex: [unrelated, legacy] };
+    const extensionSettings: Record<string, unknown> = { regex: [unrelated, legacySlot, legacyHide] };
     vi.stubGlobal('window', {
       SillyTavern: {
         getContext: () => ({ extensionSettings, saveSettingsDebounced }),
@@ -493,9 +578,10 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
     expect(ensureImageTagRegexRegistered()).toBe(true);
     const list = extensionSettings.regex as Array<Record<string, unknown>>;
     expect(list).toHaveLength(3);
-    expect(list[0]).toBe(unrelated);
+    expect(list[0].id).toBe(IMAGE_TAG_SLOT_REGEX_ID);
+    expect(list[1]).toBe(unrelated);
 
-    // 旧单条 hide 规则被原位升级为 promptOnly 版本（不再双开），用户字段保留
+    // 旧 hide 规则原位升级为 promptOnly 版本，用户字段保留
     const hide = list.find(s => s.id === IMAGE_TAG_HIDE_REGEX_ID);
     expect(hide).toMatchObject({
       scriptName: '柏宝·改 · 隐藏生图标签',
@@ -505,7 +591,7 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
       customField: 'preserved',
     });
 
-    // 新增 slot 规则且只出现一次
+    // 置顶的 slot 规则只出现一次且保留自定义字段
     const slots = list.filter(s => s.id === IMAGE_TAG_SLOT_REGEX_ID);
     expect(slots).toHaveLength(1);
     expect(slots[0]).toMatchObject({
@@ -513,7 +599,8 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
       markdownOnly: true,
       promptOnly: false,
       placement: [1, 2, 3],
-      replaceString: SLOT_DIV,
+      replaceString: SLOT_SENTINEL,
+      customSlotField: 'keep-me',
     });
     expect(saveSettingsDebounced).toHaveBeenCalledTimes(2);
   });

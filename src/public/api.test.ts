@@ -244,10 +244,10 @@ describe('generate', () => {
 
     const saved = await generate({ prompt: '1girl' });
     expect(saved.path).toBe('/user/images/x.png');
-    // 侧写存的是 tag 原文(含 <bbm_image> 壳),图库要拿它反解析出各字段
+    // 侧写存的是 tag 原文(新版 ##bbm_image 壳),图库要拿它反解析出各字段
     const [name, tag, seed] = vi.mocked(saveExternalImage).mock.calls[0];
     expect(name).toBe('小雪');
-    expect(tag).toBe('<bbm_image>1girl<size>portrait</size></bbm_image>');
+    expect(tag).toBe('##bbm_image {"tag":"1girl","size":"portrait"} bbm_image##');
     expect(seed).toBe(4242);
 
     vi.mocked(saveExternalImage).mockClear();
@@ -270,7 +270,7 @@ describe('generate', () => {
     await generate({ prompt: '1girl', size: 'portrait' });
     expect(vi.mocked(generateImage).mock.calls[0][0].size).toBe('portrait');
     const [, tag] = vi.mocked(saveExternalImage).mock.calls[0];
-    expect(tag).toBe('<bbm_image>1girl<size>landscape</size></bbm_image>');
+    expect(tag).toBe('##bbm_image {"tag":"1girl","size":"landscape"} bbm_image##');
   });
 
   it('still returns the image when saving to the gallery fails', async () => {

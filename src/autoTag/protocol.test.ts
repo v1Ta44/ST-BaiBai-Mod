@@ -164,10 +164,17 @@ describe('auto tag position protocol', () => {
     ).toThrow('P编号');
   });
 
-  it('rejects nested bbi tags in prompts', () => {
+  it('rejects nested bbi tags and ##bbm_image delimiters in prompts', () => {
     expect(() =>
       parseImagePlan(
         '{"images":[{"position":"P1","tag":"<bbm_image>bad</bbm_image>"}]}',
+        segments,
+        1,
+      ),
+    ).toThrow('不得包含');
+    expect(() =>
+      parseImagePlan(
+        '{"images":[{"position":"P1","tag":"1girl bbm_image## leaked"}]}',
         segments,
         1,
       ),
@@ -209,11 +216,11 @@ describe('auto tag position protocol', () => {
         { position: 'P1', sourceLine: 0, tag: 'prompt b', nl: '', negative: '', characters: [], size: 'landscape' },
       ]),
     ).toBe(
-      '第一行\n<bbm_image>prompt a<size>portrait</size></bbm_image>\n<bbm_image>prompt b<size>landscape</size></bbm_image>\n第二行',
+      '第一行\n##bbm_image {"tag":"prompt a","size":"portrait"} bbm_image##\n##bbm_image {"tag":"prompt b","size":"landscape"} bbm_image##\n第二行',
     );
   });
 
-  it('wraps the nl part in a <nl> sub-tag, keeping the tag part bare', () => {
+  it('serializes the nl part in the JSON payload', () => {
     expect(
       injectImageTags('第一行', [
         {
@@ -227,11 +234,11 @@ describe('auto tag position protocol', () => {
         },
       ]),
     ).toBe(
-      '第一行\n<bbm_image>1girl, moonlight<nl>A girl in moonlight.</nl><size>portrait</size></bbm_image>',
+      '第一行\n##bbm_image {"tag":"1girl, moonlight","nl":"A girl in moonlight.","size":"portrait"} bbm_image##',
     );
   });
 
-  it('wraps the dynamic negative part in a <negative> sub-tag', () => {
+  it('serializes the dynamic negative part in the JSON payload', () => {
     expect(
       injectImageTags('第一行', [
         {
@@ -245,17 +252,17 @@ describe('auto tag position protocol', () => {
         },
       ]),
     ).toBe(
-      '第一行\n<bbm_image>1girl<negative>extra people, duplicate character</negative><size>portrait</size></bbm_image>',
+      '第一行\n##bbm_image {"tag":"1girl","negative":"extra people, duplicate character","size":"portrait"} bbm_image##',
     );
   });
 
 
-  it('serializes V5 character prompts as a JSON sub-tag', () => {
+  it('serializes V5 character prompts in the JSON payload', () => {
     const output = injectImageTags('line', [{
       position: 'P1', sourceLine: 0, tag: '1girl', nl: 'base', negative: '',
       characters: [{ name: 'A', tag: 'girl, black hair', nl: 'left' }], size: 'portrait',
     }]);
-    expect(output).toContain('<characters>[{"name":"A","tag":"girl, black hair","nl":"left"}]</characters>');
+    expect(output).toContain('"characters":[{"name":"A","tag":"girl, black hair","nl":"left"}]');
   });
 
   it('preserves CRLF and appends correctly after the final line', () => {
@@ -265,7 +272,7 @@ describe('auto tag position protocol', () => {
         { position: 'P2', sourceLine: 2, tag: 'prompt c', nl: '', negative: '', characters: [], size: 'portrait' },
       ]),
     ).toBe(
-      '第一行\r\n<bbm_image>prompt a<size>portrait</size></bbm_image>\r\n\r\n第三行\r\n<bbm_image>prompt c<size>portrait</size></bbm_image>',
+      '第一行\r\n##bbm_image {"tag":"prompt a","size":"portrait"} bbm_image##\r\n\r\n第三行\r\n##bbm_image {"tag":"prompt c","size":"portrait"} bbm_image##',
     );
   });
 });
@@ -414,12 +421,12 @@ describe('comic plan parsing', () => {
     expect(() => parseComicPlan(JSON.stringify({ pages: [page('P9')] }), segments)).toThrow(/P9/);
   });
 
-  it('injects pages as <type>comic</type> tags that parse back', () => {
+  it('injects pages as comic tags that parse back', () => {
     const plan = parseComicPlan(JSON.stringify({ pages: [page('P1')] }), segments);
     const output = injectImageTags(['第一幕结束', '', '第二幕结束'].join('\n'), plan.images);
     const tags = parseImageTags(output);
     expect(tags).toHaveLength(1);
-    expect(tags[0]).toContain('<type>comic</type>');
+    expect(tags[0]).toContain('"type":"comic"');
     expect(parseImageTagContent(tags[0]).layout).toEqual(plan.images[0].layout);
   });
 });

@@ -11,10 +11,16 @@ function fakeHost(options: {
   connected?: boolean;
   /** closest(selector) 的返回值表;缺的选择器返回 null。 */
   ancestors?: Record<string, unknown>;
+  parentElement?: unknown;
+  ownerDocument?: unknown;
+  getRootNode?: () => unknown;
 }): Element {
-  const { connected = true, ancestors = {} } = options;
+  const { connected = true, ancestors = {}, parentElement = null, ownerDocument, getRootNode } = options;
   return {
     isConnected: connected,
+    parentElement,
+    ownerDocument,
+    getRootNode,
     closest: (selector: string) => ancestors[selector] ?? null,
   } as unknown as Element;
 }
@@ -68,12 +74,62 @@ describe('checkSlotHealth', () => {
     // 别把「结构不认识」当成异常去反复重挂:不知道怎么救的情况下什么都别做
     expect(checkSlotHealth(fakeHost({}))).toBe('ok');
   });
+
+  it('reports hidden-by-beautify when an ancestor has display:none, is <pre>, or is closed <details>', () => {
+    const hiddenDiv = {
+      tagName: 'DIV',
+      style: { display: 'none' },
+      parentElement: null,
+      hasAttribute: () => false,
+      getAttribute: () => null,
+    };
+    expect(checkSlotHealth(fakeHost({ parentElement: hiddenDiv }))).toBe('hidden-by-beautify');
+
+    const preEl = {
+      tagName: 'PRE',
+      parentElement: null,
+      hasAttribute: () => false,
+      getAttribute: () => null,
+    };
+    expect(checkSlotHealth(fakeHost({ parentElement: preEl }))).toBe('hidden-by-beautify');
+
+    const closedDetails = {
+      tagName: 'DETAILS',
+      parentElement: null,
+      hasAttribute: (attr: string) => attr === 'open' ? false : false,
+      getAttribute: () => null,
+    };
+    expect(checkSlotHealth(fakeHost({ parentElement: closedDetails }))).toBe('hidden-by-beautify');
+  });
 });
 
 describe('floorIdOf', () => {
   it('reads the floor number from the enclosing .mes', () => {
     expect(floorIdOf(fakeHost({ ancestors: { '.mes': fakeMes('7') } }))).toBe(7);
     expect(floorIdOf(fakeHost({ ancestors: { '.mes': fakeMes('0') } }))).toBe(0);
+  });
+
+  it('resolves floorId across nested ShadowRoot and iframe boundaries', () => {
+    const outerFrame = {
+      isConnected: true,
+      closest: (sel: string) => (sel === '.mes' ? fakeMes('12') : null),
+    };
+    const innerFrame = {
+      isConnected: true,
+      closest: () => null,
+      ownerDocument: { defaultView: { frameElement: outerFrame } },
+    };
+    const shadowHost = {
+      isConnected: true,
+      closest: () => null,
+      ownerDocument: { defaultView: { frameElement: innerFrame } },
+    };
+    const host = fakeHost({
+      connected: true,
+      getRootNode: () => ({ host: shadowHost }),
+    });
+    expect(floorIdOf(host)).toBe(12);
+    expect(checkSlotHealth(host)).toBe('ok');
   });
 
   it('returns null when there is no enclosing .mes', () => {
